@@ -3211,20 +3211,20 @@ void Collection::expand_search_query(const string& raw_query, size_t offset, siz
 void Collection::copy_highlight_doc(std::vector<highlight_field_t>& hightlight_items,
                                     const bool nested_fields_enabled,
                                     const nlohmann::json& src, nlohmann::json& dst) {
-    for(const auto& hightlight_item: hightlight_items) {
-        if(!nested_fields_enabled && src.count(hightlight_item.name) != 0) {
-            dst[hightlight_item.name] = src[hightlight_item.name];
+    for(const auto& highlight_item: hightlight_items) {
+        if(!nested_fields_enabled && src.count(highlight_item.name) != 0) {
+            dst[highlight_item.name] = src[highlight_item.name];
             continue;
         }
 
         std::string root_field_name;
 
-        for(size_t i = 0; i < hightlight_item.name.size(); i++) {
-            if(hightlight_item.name[i] == '.') {
+        for(size_t i = 0; i < highlight_item.name.size(); i++) {
+            if(highlight_item.name[i] == '.') {
                 break;
             }
 
-            root_field_name += hightlight_item.name[i];
+            root_field_name += highlight_item.name[i];
         }
 
         if(dst.count(root_field_name) != 0) {
@@ -3236,8 +3236,8 @@ void Collection::copy_highlight_doc(std::vector<highlight_field_t>& hightlight_i
         if(src.count(root_field_name) != 0) {
             // copy whole sub-object
             dst[root_field_name] = src[root_field_name];
-        } else if(src.count(hightlight_item.name) != 0) {
-            dst[hightlight_item.name] = src[hightlight_item.name];
+        } else if(src.count(highlight_item.name) != 0) {
+            dst[highlight_item.name] = src[highlight_item.name];
         }
     }
 }
