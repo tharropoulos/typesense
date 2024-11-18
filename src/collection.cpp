@@ -3208,36 +3208,36 @@ void Collection::expand_search_query(const string& raw_query, size_t offset, siz
     }
 }
 
-void Collection::copy_highlight_doc(std::vector<highlight_field_t>& hightlight_items,
+void Collection::copy_highlight_doc(std::vector<highlight_field_t>& highlight_items,
                                     const bool nested_fields_enabled,
                                     const nlohmann::json& src, nlohmann::json& dst) {
-    for(const auto& highlight_item: hightlight_items) {
-        if(!nested_fields_enabled && src.count(highlight_item.name) != 0) {
+    for(const auto& highlight_item: highlight_items) {
+        // Handle direct fields (including flattened fields)
+        if(src.count(highlight_item.name) != 0) {
             dst[highlight_item.name] = src[highlight_item.name];
             continue;
         }
 
-        std::string root_field_name;
+        // Skip nested field handling if disabled
+        if(!nested_fields_enabled) {
+            continue;
+        }
 
+        // Handle nested fields
+        std::string root_field_name;
         for(size_t i = 0; i < highlight_item.name.size(); i++) {
             if(highlight_item.name[i] == '.') {
                 break;
             }
-
             root_field_name += highlight_item.name[i];
         }
 
-        if(dst.count(root_field_name) != 0) {
-            // skip if parent "foo" has already has been copied over in e.g. foo.bar, foo.baz
-            continue;
-        }
-
-        // root field name might not exist if object has primitive field values with "."s in the name
-        if(src.count(root_field_name) != 0) {
-            // copy whole sub-object
+        // Only handle nested if root object exists and hasn't been copied
+        if(!root_field_name.empty() && 
+           src.count(root_field_name) != 0 &&
+           dst.count(root_field_name) == 0 &&
+           src[root_field_name].is_object()) {
             dst[root_field_name] = src[root_field_name];
-        } else if(src.count(highlight_item.name) != 0) {
-            dst[highlight_item.name] = src[highlight_item.name];
         }
     }
 }
