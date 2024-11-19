@@ -674,10 +674,12 @@ public:
                                   const tsl::htrie_map<char, token_leaf>& qtoken_set,
                                   std::vector<highlight_field_t>& highlight_items) const;
 
-    static void copy_highlight_doc(std::vector<highlight_field_t>& hightlight_items,
-                                   const bool nested_fields_enabled,
-                                   const nlohmann::json& src,
-                                   nlohmann::json& dst);
+    void copy_highlight_doc(std::vector<highlight_field_t>& highlight_items,
+                            bool nested_fields_enabled,
+                            const nlohmann::json& src,
+                            nlohmann::json& dst,
+                            const tsl::htrie_map<char, field>& schema) const;
+
 
     Option<bool> alter(nlohmann::json& alter_payload);
 

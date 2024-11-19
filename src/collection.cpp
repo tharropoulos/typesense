@@ -2632,7 +2632,7 @@ Option<nlohmann::json> Collection::search(std::string raw_query,
             nlohmann::json highlight_res = nlohmann::json::object();
 
             if(!highlight_items.empty()) {
-                copy_highlight_doc(highlight_items, enable_nested_fields, document, highlight_res);
+                copy_highlight_doc(highlight_items, enable_nested_fields, document, highlight_res, search_schema);
                 remove_flat_fields(highlight_res);
                 remove_reference_helper_fields(highlight_res);
                 highlight_res.erase("id");
@@ -3208,36 +3208,61 @@ void Collection::expand_search_query(const string& raw_query, size_t offset, siz
     }
 }
 
-void Collection::copy_highlight_doc(std::vector<highlight_field_t>& hightlight_items,
-                                    const bool nested_fields_enabled,
-                                    const nlohmann::json& src, nlohmann::json& dst) {
-    for(const auto& hightlight_item: hightlight_items) {
-        if(!nested_fields_enabled && src.count(hightlight_item.name) != 0) {
-            dst[hightlight_item.name] = src[hightlight_item.name];
+void Collection::copy_highlight_doc(std::vector<highlight_field_t>& highlight_items,
+                                  bool nested_fields_enabled,
+                                  const nlohmann::json& src,
+                                  nlohmann::json& dst,
+                                  const tsl::htrie_map<char, field>& schema) const {
+    for(const auto& highlight_item: highlight_items) {
+        if(!nested_fields_enabled) {
+            if(src.count(highlight_item.name) != 0) {
+                dst[highlight_item.name] = src[highlight_item.name];
+            }
             continue;
         }
 
-        std::string root_field_name;
+        // Split field path
+        std::vector<std::string> path_parts;
+        StringUtils::split(highlight_item.name, path_parts, ".");
 
-        for(size_t i = 0; i < hightlight_item.name.size(); i++) {
-            if(hightlight_item.name[i] == '.') {
+        // Check parent field in schema
+        std::string parent_path;
+        for(size_t i = 0; i < path_parts.size() - 1; i++) {
+            if(i > 0) parent_path += ".";
+            parent_path += path_parts[i];
+        }
+
+        auto parent_field = schema.find(parent_path);
+        // If parent exists in schema and is not an object type, treat as flat field
+        if(parent_field != schema.end() &&
+           parent_field->type != field_types::OBJECT &&
+           parent_field->type != field_types::OBJECT_ARRAY) {
+            if(src.count(highlight_item.name) != 0) {
+                dst[highlight_item.name] = src[highlight_item.name];
+            }
+            continue;
+        }
+
+        // Otherwise handle as nested structure
+        std::string root_field_name;
+        for(size_t i = 0; i < highlight_item.name.size(); i++) {
+            if(highlight_item.name[i] == '.') {
                 break;
             }
-
-            root_field_name += hightlight_item.name[i];
+            root_field_name += highlight_item.name[i];
         }
 
         if(dst.count(root_field_name) != 0) {
-            // skip if parent "foo" has already has been copied over in e.g. foo.bar, foo.baz
+            // Root already copied
             continue;
         }
 
-        // root field name might not exist if object has primitive field values with "."s in the name
         if(src.count(root_field_name) != 0) {
-            // copy whole sub-object
+            // Copy root field
             dst[root_field_name] = src[root_field_name];
-        } else if(src.count(hightlight_item.name) != 0) {
-            dst[hightlight_item.name] = src[hightlight_item.name];
+        } else if(src.count(highlight_item.name) != 0) {
+            // No root field, but highlight field exists
+            dst[highlight_item.name] = src[highlight_item.name];
         }
     }
 }
