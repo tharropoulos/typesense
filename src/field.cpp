@@ -390,7 +390,26 @@ Option<bool> field::json_field_to_field(bool enable_nested_fields, nlohmann::jso
 
     if(is_obj || (!is_regexp_name && enable_nested_fields &&
                    field_json[fields::name].get<std::string>().find('.') != std::string::npos)) {
-        field_json[fields::nested] = true;
+        bool is_nested = false;
+        std::string field_name = field_json[fields::name].get<std::string>();
+
+        if(is_obj) {
+            is_nested = true;
+        } else {
+            // Get immediate parent path (everything before the last dot)
+            size_t last_dot = field_name.find_last_of('.');
+            if(last_dot != std::string::npos) {
+                std::string parent_path = field_name.substr(0, last_dot);
+                auto parent_field_it = std::find_if(the_fields.begin(), the_fields.end(),
+                    [&parent_path](const field& f) { return f.name == parent_path; });
+
+                if(parent_field_it != the_fields.end()) {
+                    is_nested = parent_field_it->is_object();
+                }
+            }
+        }
+
+        field_json[fields::nested] = is_nested;
         field_json[fields::nested_array] = field::VAL_UNKNOWN;  // unknown, will be resolved during read
     } else {
         field_json[fields::nested] = false;
