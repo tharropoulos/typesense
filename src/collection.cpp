@@ -3416,8 +3416,9 @@ void Collection::process_highlight_fields(const std::vector<search_field_t>& sea
             bool infixed = (fields_infixed_set.count(field_name) != 0);
             auto schema_it = search_schema.find(field_name);
             bool is_string = (schema_it != search_schema.end()) && schema_it->is_string();
+            bool is_nested = schema_it->nested;
 
-            highlight_items.emplace_back(field_name, fully_highlighted, infixed, is_string);
+            highlight_items.emplace_back(field_name, fully_highlighted, infixed, is_string, is_nested);
         }
     } else {
         std::vector<std::string> highlight_field_names_expanded;
@@ -3435,7 +3436,9 @@ void Collection::process_highlight_fields(const std::vector<search_field_t>& sea
             bool fully_highlighted = (fields_highlighted_fully_set.count(highlight_field_name) != 0);
             bool infixed = (fields_infixed_set.count(highlight_field_name) != 0);
             bool is_string = schema_it->is_string();
-            highlight_items.emplace_back(highlight_field_name, fully_highlighted, infixed, is_string);
+            bool is_nested = schema_it->nested;
+
+            highlight_items.emplace_back(highlight_field_name, fully_highlighted, infixed, is_string, is_nested);
         }
     }
 

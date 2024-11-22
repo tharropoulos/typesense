@@ -32,11 +32,15 @@ struct highlight_field_t {
     bool fully_highlighted;
     bool infix;
     bool is_string;
+    bool nested;
     tsl::htrie_map<char, token_leaf> qtoken_leaves;
 
-    highlight_field_t(const std::string& name, bool fully_highlighted, bool infix, bool is_string):
-            name(name), fully_highlighted(fully_highlighted), infix(infix), is_string(is_string) {
-
+    highlight_field_t(const std::string& name, bool fully_highlighted, bool infix, bool is_string, bool nested = false):
+            name(name),
+            fully_highlighted(fully_highlighted),
+            infix(infix),
+            is_string(is_string),
+            nested(nested) {
     }
 };
 
