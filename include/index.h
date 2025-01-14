@@ -518,7 +518,6 @@ private:
                                        const std::vector<search_field_t>& the_fields,
                                        filter_result_iterator_t* const filter_result_iterator,
                                        const uint32_t* excluded_result_ids, size_t excluded_result_ids_size,
-                                       const std::unordered_set<uint32_t>& excluded_group_ids,
                                        const std::vector<sort_by>& sort_fields,
                                        std::vector<tok_candidates>& token_candidates_vec,
                                        std::vector<std::vector<art_leaf*>>& searched_queries,
@@ -569,7 +568,11 @@ private:
 
     void collate_included_ids(const std::vector<token_t>& q_included_tokens,
                               const std::map<size_t, std::map<size_t, uint32_t>> & included_ids_map,
-                              Topster<KV>*& curated_topster, std::vector<std::vector<art_leaf*>> & searched_queries) const;
+                              Topster<KV>*& curated_topster,
+                              const size_t group_limit,
+                              const std::vector<std::string>& group_by_fields,
+                              const bool group_missing_values,
+                              std::vector<std::vector<art_leaf*>> & searched_queries) const;
 
     static void compute_facet_stats(facet &a_facet, const std::string& raw_value,
                                     const std::string & field_type, const size_t count);
@@ -597,10 +600,11 @@ private:
                                    const tsl::htrie_map<char, field> & search_schema, const size_t remote_embedding_batch_size = 200,
                                    const size_t remote_embedding_timeout_ms = 60000, const size_t remote_embedding_num_tries = 2);
     
-    static void process_embed_results(std::vector<std::pair<index_record*, std::string>>& values_to_embed,
-                                     const index_record* record,
-                                     const std::vector<embedding_res_t>& embedding_results,
-                                     size_t& count, const field& the_field);
+    static void process_embed_results(const std::vector<std::pair<index_record*, std::string>>& values_to_embed_text,
+                                      const std::vector<embedding_res_t>& embeddings_text,
+                                      const std::vector<std::pair<index_record*, std::string>>& values_to_embed_image,
+                                      const std::vector<embedding_res_t>& embeddings_image,
+                                      const field& the_field);
 
     void update_async_references(const std::string& collection_name, const field& afield,
                                  std::vector<index_record>& iter_batch,
@@ -830,12 +834,12 @@ public:
     // the following methods are not synchronized because their parent calls are synchronized or they are const/static
 
     Option<bool> search_wildcard(filter_node_t const* const& filter_tree_root,
-                                 const std::vector<sort_by>& sort_fields, Topster<KV>*& topster, Topster<KV>*& curated_topster,
+                                 const std::vector<sort_by>& sort_fields, Topster<KV>*& topster,
                                  spp::sparse_hash_map<uint64_t, uint32_t>& groups_processed,
                                  std::vector<std::vector<art_leaf*>>& searched_queries, const size_t group_limit,
                                  const std::vector<std::string>& group_by_fields,
                                  const bool group_missing_values, const uint32_t* exclude_token_ids,
-                                 size_t exclude_token_ids_size, const std::unordered_set<uint32_t>& excluded_group_ids,
+                                 size_t exclude_token_ids_size,
                                  uint32_t*& all_result_ids, size_t& all_result_ids_len,
                                  filter_result_iterator_t* const filter_result_iterator,
                                  const size_t concurrency,
@@ -895,7 +899,6 @@ public:
                                  std::array<spp::sparse_hash_map<uint32_t, int64_t, Hasher32>*, 3> field_values,
                                  const std::vector<size_t>& geopoint_indices,
                                  const std::vector<uint32_t>& curated_ids_sorted,
-                                 const std::unordered_set<uint32_t>& excluded_group_ids,
                                  uint32_t*& all_result_ids, size_t& all_result_ids_len,
                                  spp::sparse_hash_map<uint64_t, uint32_t>& groups_processed,
                                  const std::string& collection_name = "") const;
@@ -903,7 +906,7 @@ public:
     [[nodiscard]] Option<bool> do_synonym_search(const std::vector<search_field_t>& the_fields,
                                                  const text_match_type_t match_type,
                                                  filter_node_t const* const& filter_tree_root,
-                                                 const std::vector<sort_by>& sort_fields_std, Topster<KV>*& curated_topster,
+                                                 const std::vector<sort_by>& sort_fields_std,
                                                  const token_ordering& token_order,
                                                  const size_t typo_tokens_threshold, const size_t group_limit,
                                                  const std::vector<std::string>& group_by_fields,
@@ -917,7 +920,6 @@ public:
                                                  size_t min_len_2typo, const size_t max_candidates, const std::set<uint32_t>& curated_ids,
                                                  const std::vector<uint32_t>& curated_ids_sorted, const uint32_t* exclude_token_ids,
                                                  size_t exclude_token_ids_size,
-                                                 const std::unordered_set<uint32_t>& excluded_group_ids,
                                                  Topster<KV>* actual_topster,
                                                  std::vector<std::vector<token_t>>& q_pos_synonyms,
                                                  int syn_orig_num_tokens,
@@ -945,7 +947,6 @@ public:
                                   uint32_t*& all_result_ids, size_t& all_result_ids_len,
                                   spp::sparse_hash_map<uint64_t, uint32_t>& groups_processed,
                                   const uint32_t* excluded_result_ids, size_t excluded_result_ids_size,
-                                  const std::unordered_set<uint32_t>& excluded_group_ids,
                                   bool is_wildcard_query) const;
 
     [[nodiscard]] Option<bool> fuzzy_search_fields(const std::vector<search_field_t>& the_fields,
@@ -956,7 +957,6 @@ public:
                                                    size_t excluded_result_ids_size,
                                                    filter_result_iterator_t* const filter_result_iterator,
                                                    const std::vector<uint32_t>& curated_ids,
-                                                   const std::unordered_set<uint32_t>& excluded_group_ids,
                                                    const std::vector<sort_by>& sort_fields,
                                                    const std::vector<uint32_t>& num_typos,
                                                    std::vector<std::vector<art_leaf*>>& searched_queries,
@@ -1016,7 +1016,6 @@ public:
                                       const int syn_orig_num_tokens,
                                       const uint32_t* excluded_result_ids,
                                       size_t excluded_result_ids_size,
-                                      const std::unordered_set<uint32_t>& excluded_group_ids,
                                       const int* sort_order,
                                       std::array<spp::sparse_hash_map<uint32_t, int64_t, Hasher32>*, 3>& field_values,
                                       const std::vector<size_t>& geopoint_indices,
@@ -1067,8 +1066,7 @@ public:
                              filter_result_iterator_t* const filter_result_iterator,
                              std::set<uint32_t>& curated_ids,
                              std::map<size_t, std::map<size_t, uint32_t>>& included_ids_map,
-                             std::vector<uint32_t>& included_ids_vec,
-                             std::unordered_set<uint32_t>& excluded_group_ids) const;
+                             std::vector<uint32_t>& included_ids_vec) const;
     
     int64_t get_doc_val_from_sort_index(sort_index_iterator it, uint32_t doc_seq_id) const;
 
