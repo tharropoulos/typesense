@@ -1192,7 +1192,9 @@ TEST_F(CollectionTest, ImportDocumentsUpsert) {
                     R"({"id": "5", "points": 60, "cast":["Logan Lerman","Alexandra Daddario"],"starring":"Ron Perlman","starring_facet":"Ron Perlman","title":"Percy Jackson: Sea of Monsters"})",
                     R"({"id": "24", "starring": "John", "cast": ["John Kim"], "points": 11})"};   // missing fields
 
-    import_response = coll_mul_fields->add_many(more_records, document, UPSERT);
+    bool return_id = true;
+    import_response = coll_mul_fields->add_many(more_records, document, UPSERT, "",
+                                                DIRTY_VALUES::COERCE_OR_REJECT, false, return_id);
 
     ASSERT_FALSE(import_response["success"].get<bool>());
     ASSERT_EQ(2, import_response["num_imported"].get<int>());
@@ -1203,12 +1205,18 @@ TEST_F(CollectionTest, ImportDocumentsUpsert) {
     ASSERT_STREQ("Field `points` has been declared as a default sorting field, but is not found in the document.", import_results[1]["error"].get<std::string>().c_str());
     ASSERT_STREQ("Field `title` has been declared in the schema, but is not found in the document.", import_results[3]["error"].get<std::string>().c_str());
 
+    ASSERT_EQ("1", import_results[0]["id"].get<std::string>());
+    ASSERT_EQ("90", import_results[1]["id"].get<std::string>());
+    ASSERT_EQ("5", import_results[2]["id"].get<std::string>());
+    ASSERT_EQ("24", import_results[3]["id"].get<std::string>());
+
     // try to duplicate records without upsert option
 
     more_records = {R"({"id": "1", "title": "Wake up, Harry"})",
                     R"({"id": "5", "points": 60})"};
 
-    import_response = coll_mul_fields->add_many(more_records, document, CREATE);
+    import_response = coll_mul_fields->add_many(more_records, document, CREATE, "",
+                                                DIRTY_VALUES::COERCE_OR_REJECT, false);
     ASSERT_FALSE(import_response["success"].get<bool>());
     ASSERT_EQ(0, import_response["num_imported"].get<int>());
 
@@ -1217,6 +1225,9 @@ TEST_F(CollectionTest, ImportDocumentsUpsert) {
     ASSERT_FALSE(import_results[1]["success"].get<bool>());
     ASSERT_STREQ("A document with id 1 already exists.", import_results[0]["error"].get<std::string>().c_str());
     ASSERT_STREQ("A document with id 5 already exists.", import_results[1]["error"].get<std::string>().c_str());
+
+    // doc should not be returned, since return_doc = false
+    ASSERT_FALSE(import_results[0].contains("document"));
 
     // update document with verbatim fields, except for points
     more_records = {R"({"id": "3", "cast":["Matt Damon","Ben Affleck","Minnie Driver"],
@@ -1586,7 +1597,7 @@ TEST_F(CollectionTest, ImportDocuments) {
                                "{\"title\": \"Test4\", \"points\": 55, "
                                    "\"cast\": [\"Tom Skerritt\"] }"};
 
-    import_response = coll_mul_fields->add_many(more_records, document, CREATE, "", DIRTY_VALUES::REJECT);
+    import_response = coll_mul_fields->add_many(more_records, document, CREATE, "", DIRTY_VALUES::REJECT, true);
     ASSERT_FALSE(import_response["success"].get<bool>());
     ASSERT_EQ(2, import_response["num_imported"].get<int>());
 
@@ -1611,7 +1622,7 @@ TEST_F(CollectionTest, ImportDocuments) {
                     "{\"id\": \"id1\", \"title\": \"Test1\", \"starring\": \"Rand Fish\", \"points\": 12, "
                     "\"cast\": [\"Tom Skerritt\"] }"};
 
-    import_response = coll_mul_fields->add_many(more_records, document);
+    import_response = coll_mul_fields->add_many(more_records, document, CREATE, "", DIRTY_VALUES::COERCE_OR_REJECT, true);
 
     ASSERT_FALSE(import_response["success"].get<bool>());
     ASSERT_EQ(1, import_response["num_imported"].get<int>());
@@ -1629,7 +1640,7 @@ TEST_F(CollectionTest, ImportDocuments) {
 
     // valid JSON but not a document
     more_records = {"[]"};
-    import_response = coll_mul_fields->add_many(more_records, document);
+    import_response = coll_mul_fields->add_many(more_records, document, CREATE, "", DIRTY_VALUES::COERCE_OR_REJECT, true);
 
     ASSERT_FALSE(import_response["success"].get<bool>());
     ASSERT_EQ(0, import_response["num_imported"].get<int>());
@@ -1643,7 +1654,7 @@ TEST_F(CollectionTest, ImportDocuments) {
 
     // invalid JSON
     more_records = {"{"};
-    import_response = coll_mul_fields->add_many(more_records, document);
+    import_response = coll_mul_fields->add_many(more_records, document, CREATE, "", DIRTY_VALUES::COERCE_OR_REJECT, true);
 
     ASSERT_FALSE(import_response["success"].get<bool>());
     ASSERT_EQ(0, import_response["num_imported"].get<int>());
@@ -2590,8 +2601,14 @@ TEST_F(CollectionTest, UpdateDocuments) {
     nlohmann::json document;
     document["user_name"] = "slim_cat";
     std::string dirty_values;
+    bool validate_field_names = false;
 
-    auto update_op = update_docs_collection->update_matching_filter("user_name:=fat_cat", document.dump(), dirty_values);
+    auto update_op = update_docs_collection->update_matching_filter("foo:=fat_cat", document.dump(), dirty_values,
+                                                                    validate_field_names);
+    ASSERT_TRUE(update_op.ok());
+    ASSERT_EQ(0, update_op.get()["num_updated"]);
+
+    update_op = update_docs_collection->update_matching_filter("user_name:=fat_cat", document.dump(), dirty_values);
     ASSERT_TRUE(update_op.ok());
     ASSERT_EQ(2, update_op.get()["num_updated"]);
 
@@ -2601,6 +2618,8 @@ TEST_F(CollectionTest, UpdateDocuments) {
         ASSERT_EQ("slim_cat", res["hits"][i]["document"]["user_name"].get<std::string>());
     }
 
+    validate_field_names = true;
+
     // Test batching
     res = update_docs_collection->search("dog data", {"content"}, "", {}, sort_fields, {0}, 10).get();
     ASSERT_EQ(3, res["hits"].size());
@@ -2609,7 +2628,8 @@ TEST_F(CollectionTest, UpdateDocuments) {
     }
 
     document["user_name"] = "lazy_dog";
-    update_op = update_docs_collection->update_matching_filter("user_name:=fast_dog", document.dump(), dirty_values, 2);
+    update_op = update_docs_collection->update_matching_filter("user_name:=fast_dog", document.dump(), dirty_values,
+                                                               validate_field_names, 2);
     ASSERT_TRUE(update_op.ok());
     ASSERT_EQ(3, update_op.get()["num_updated"]);
 
@@ -2629,7 +2649,8 @@ TEST_F(CollectionTest, UpdateDocuments) {
     document.clear();
     document["content"]["title"] = "fancy cat title";
 
-    update_op = update_docs_collection->update_matching_filter("user_name:=slim_cat", document.dump(), dirty_values, 2);
+    update_op = update_docs_collection->update_matching_filter("user_name:=slim_cat", document.dump(), dirty_values,
+                                                               validate_field_names, 2);
     ASSERT_TRUE(update_op.ok());
     ASSERT_EQ(2, update_op.get()["num_updated"]);
 
@@ -2649,7 +2670,8 @@ TEST_F(CollectionTest, UpdateDocuments) {
     document.clear();
     document["likes"] = 0;
 
-    update_op = update_docs_collection->update_matching_filter("*", document.dump(), dirty_values, 2);
+    update_op = update_docs_collection->update_matching_filter("*", document.dump(), dirty_values, validate_field_names,
+                                                               2);
     ASSERT_TRUE(update_op.ok());
     ASSERT_EQ(5, update_op.get()["num_updated"]);
 
@@ -3065,16 +3087,24 @@ TEST_F(CollectionTest, WildcardQueryReturnsResultsBasedOnPerPageParam) {
     ASSERT_EQ(25, results["found"].get<int>());
 
     // enforce limit_hits
-    res_op = collection->search("*", query_fields, "", facets, sort_fields, {0}, 10, 3,
+    auto limit_hits = 20;
+    results = collection->search("*", query_fields, "", facets, sort_fields, {0}, 10, 3,
                                  FREQUENCY, {false}, 1000,
                                  spp::sparse_hash_set<std::string>(),
                                  spp::sparse_hash_set<std::string>(), 10, "", 30, 4, "", 40, {}, {}, {}, 0,
-                                 "<mark>", "</mark>", {1}, 20);
+                                 "<mark>", "</mark>", {1}, limit_hits).get();
 
-    ASSERT_FALSE(res_op.ok());
-    ASSERT_STREQ(
-            "Only upto 20 hits can be fetched. Ensure that `page` and `per_page` parameters are within this range.",
-            res_op.error().c_str());
+    ASSERT_EQ(0, results["hits"].size());
+    ASSERT_EQ(25, results["found"].get<int>());
+
+    results = collection->search("*", query_fields, "", facets, sort_fields, {0}, 15, 2,
+                                 FREQUENCY, {false}, 1000,
+                                 spp::sparse_hash_set<std::string>(),
+                                 spp::sparse_hash_set<std::string>(), 10, "", 30, 4, "", 40, {}, {}, {}, 0,
+                                 "<mark>", "</mark>", {1}, limit_hits).get();
+
+    ASSERT_EQ(5, results["hits"].size());
+    ASSERT_EQ(25, results["found"].get<int>());
 }
 
 TEST_F(CollectionTest, RemoveIfFound) {
@@ -4258,12 +4288,12 @@ TEST_F(CollectionTest, QueryParsingForPhraseSearch) {
         coll1 = collectionManager.create_collection("coll1", 1, fields, "points").get();
     }
 
-    std::vector<std::string> q_include_tokens;
+    std::vector<std::string> q_include_tokens, q_unstemmed_tokens;
     std::vector<std::vector<std::string>> q_exclude_tokens;
     std::vector<std::vector<std::string>> q_phrases;
 
     std::string q = R"(the "phrase search" query)";
-    /*coll1->parse_search_query(q, q_include_tokens, q_exclude_tokens, q_phrases, "en", false);
+    /*coll1->parse_search_query(q, q_include_tokens, q_unstemmed_tokens, q_exclude_tokens, q_phrases, "en", false);
 
     ASSERT_EQ(2, q_include_tokens.size());
     ASSERT_EQ("the", q_include_tokens[0]);
@@ -4278,9 +4308,10 @@ TEST_F(CollectionTest, QueryParsingForPhraseSearch) {
     q = R"("space padded " query)";
     q_include_tokens.clear();
     q_exclude_tokens.clear();
+    q_unstemmed_tokens.clear();
     q_phrases.clear();
 
-    coll1->parse_search_query(q, q_include_tokens, q_exclude_tokens, q_phrases, "en", false);
+    coll1->parse_search_query(q, q_include_tokens, q_unstemmed_tokens, q_exclude_tokens, q_phrases, "en", false);
     ASSERT_EQ(1, q_include_tokens.size());
     ASSERT_EQ("query", q_include_tokens[0]);
     ASSERT_EQ(1, q_phrases.size());
@@ -4295,7 +4326,7 @@ TEST_F(CollectionTest, QueryParsingForPhraseSearch) {
     q_exclude_tokens.clear();
     q_phrases.clear();
 
-    coll1->parse_search_query(q, q_include_tokens, q_exclude_tokens, q_phrases, "en", false);
+    coll1->parse_search_query(q, q_include_tokens, q_unstemmed_tokens, q_exclude_tokens, q_phrases, "en", false);
     ASSERT_EQ(1, q_include_tokens.size());
     ASSERT_EQ("*", q_include_tokens[0]);
     ASSERT_EQ(2, q_phrases.size());
@@ -4312,7 +4343,7 @@ TEST_F(CollectionTest, QueryParsingForPhraseSearch) {
     q_exclude_tokens.clear();
     q_phrases.clear();
 
-    coll1->parse_search_query(q, q_include_tokens, q_exclude_tokens, q_phrases, "en", false);
+    coll1->parse_search_query(q, q_include_tokens, q_unstemmed_tokens, q_exclude_tokens, q_phrases, "en", false);
     ASSERT_EQ(1, q_include_tokens.size());
     ASSERT_EQ("*", q_include_tokens[0]);
     ASSERT_EQ(1, q_phrases.size());
@@ -4326,7 +4357,7 @@ TEST_F(CollectionTest, QueryParsingForPhraseSearch) {
     q_exclude_tokens.clear();
     q_phrases.clear();
 
-    coll1->parse_search_query(q, q_include_tokens, q_exclude_tokens, q_phrases, "en", false);
+    coll1->parse_search_query(q, q_include_tokens, q_unstemmed_tokens, q_exclude_tokens, q_phrases, "en", false);
     ASSERT_EQ(1, q_include_tokens.size());
     ASSERT_EQ("hello", q_include_tokens[0]);
     ASSERT_EQ(0, q_phrases.size());
@@ -4337,7 +4368,7 @@ TEST_F(CollectionTest, QueryParsingForPhraseSearch) {
     q_exclude_tokens.clear();
     q_phrases.clear();
 
-    coll1->parse_search_query(q, q_include_tokens, q_exclude_tokens, q_phrases, "en", false);
+    coll1->parse_search_query(q, q_include_tokens, q_unstemmed_tokens, q_exclude_tokens, q_phrases, "en", false);
     ASSERT_EQ(1, q_include_tokens.size());
     ASSERT_EQ("here", q_include_tokens[0]);
     ASSERT_EQ(1, q_phrases.size());
@@ -4350,7 +4381,7 @@ TEST_F(CollectionTest, QueryParsingForPhraseSearch) {
     q_include_tokens.clear();
     q_exclude_tokens.clear();
     q_phrases.clear();
-    coll1->parse_search_query(q, q_include_tokens, q_exclude_tokens, q_phrases, "en", false);
+    coll1->parse_search_query(q, q_include_tokens, q_unstemmed_tokens, q_exclude_tokens, q_phrases, "en", false);
     ASSERT_EQ(1, q_include_tokens.size());
     ASSERT_EQ("here", q_include_tokens[0]);
     ASSERT_EQ(0, q_phrases.size());
@@ -4364,7 +4395,7 @@ TEST_F(CollectionTest, QueryParsingForPhraseSearch) {
     q_include_tokens.clear();
     q_exclude_tokens.clear();
     q_phrases.clear();
-    coll1->parse_search_query(q, q_include_tokens, q_exclude_tokens, q_phrases, "en", false);
+    coll1->parse_search_query(q, q_include_tokens, q_unstemmed_tokens, q_exclude_tokens, q_phrases, "en", false);
     ASSERT_EQ(1, q_include_tokens.size());
     ASSERT_EQ("here", q_include_tokens[0]);
     ASSERT_EQ(0, q_phrases.size());

@@ -11,6 +11,8 @@
 #include "raft_server.h"
 #include "logger.h"
 #include "ratelimit_manager.h"
+#include "sole.hpp"
+#include "core_api.h"
 
 HttpServer::HttpServer(const std::string & version, const std::string & listen_address,
                        uint32_t listen_port, const std::string & ssl_cert_path, const std::string & ssl_cert_key_path,
@@ -435,7 +437,7 @@ int HttpServer::catch_all_handler(h2o_handler_t *_h2o_handler, h2o_req_t *req) {
     bool use_meta_thread_pool = (root_resource == "status");
 
     if(needs_readiness_check) {
-        bool write_op = is_write_request(root_resource, http_method);
+        bool write_op = is_write_request(root_resource, http_method, rpath->handler);
         bool read_op = !write_op;
 
         std::string message = "{ \"message\": \"Not Ready or Lagging\"}";
@@ -508,9 +510,17 @@ int HttpServer::catch_all_handler(h2o_handler_t *_h2o_handler, h2o_req_t *req) {
         }
     }
 
+    ssize_t content_type_header_cursor = h2o_find_header_by_str(&req->headers, http_req::CONTENT_TYPE_HEADER, strlen(http_req::CONTENT_TYPE_HEADER), -1);
+    bool is_binary_body = false;
+    if (content_type_header_cursor != -1) {
+        h2o_iovec_t& slot = req->headers.entries[content_type_header_cursor].value;
+        std::string content_type = std::string(slot.base, slot.len);
+        is_binary_body = (content_type == http_req::OCTET_STREAM_HEADER_VALUE);
+    }
+
     std::shared_ptr<http_req> request = std::make_shared<http_req>(req, rpath->http_method, path_without_query,
                                                                    route_hash, query_map, embedded_params_vec,
-                                                                   api_auth_key_sent, body, client_ip);
+                                                                   api_auth_key_sent, body, client_ip, is_binary_body);
 
     // add custom generator with a dispose function for cleaning up resources
     h2o_custom_generator_t* custom_gen = new h2o_custom_generator_t;
@@ -545,6 +555,19 @@ int HttpServer::catch_all_handler(h2o_handler_t *_h2o_handler, h2o_req_t *req) {
         request->metadata = StringUtils::randstring(AuthManager::GENERATED_KEY_LEN);
     }
 
+    if(rpath->action == "conversations/models:create") {
+        try {
+            nlohmann::json body_json = nlohmann::json::parse(request->body);
+            if(body_json.count("id") != 0 && body_json["id"].is_string()) {
+               request->metadata = body_json["id"].get<std::string>();
+            } else {
+                request->metadata = sole::uuid4().str();
+            }
+        } catch (const nlohmann::json::parse_error& e) {
+            request->metadata = sole::uuid4().str();
+        }
+    }
+
     if(req->proceed_req == nullptr) {
         // Full request body is already available, so we don't care if handler is async or not
         //LOG(INFO) << "Full request body is already available: " << req->entity.len;
@@ -566,13 +589,18 @@ int HttpServer::catch_all_handler(h2o_handler_t *_h2o_handler, h2o_req_t *req) {
 }
 
 
-bool HttpServer::is_write_request(const std::string& root_resource, const std::string& http_method) {
+bool HttpServer::is_write_request(const std::string& root_resource, const std::string& http_method,
+                                  bool (*rpath_handler)(const std::shared_ptr<http_req>&, const std::shared_ptr<http_res>&)) {
     if(http_method == "GET") {
         return false;
     }
 
+    if(rpath_handler == post_create_event) {
+        return false;
+    }
+
     bool write_free_request = (root_resource == "multi_search" || root_resource == "proxy" ||
-                               root_resource == "operations");
+                               root_resource == "operations" || root_resource == "config");
 
     if(!write_free_request &&
        (http_method == "POST" || http_method == "PUT" ||
@@ -687,7 +715,7 @@ int HttpServer::process_request(const std::shared_ptr<http_req>& request, const 
         }
     }
 
-    bool is_write = is_write_request(root_resource, rpath->http_method);
+    bool is_write = is_write_request(root_resource, rpath->http_method, rpath->handler);
 
     if(is_write) {
         handler->http_server->get_replication_state()->write(request, response);
@@ -700,6 +728,7 @@ int HttpServer::process_request(const std::shared_ptr<http_req>& request, const 
                        handler->http_server->get_thread_pool();
 
     // LOG(INFO) << "Before enqueue res: " << response
+    thread_pool->log_exhaustion();
     thread_pool->enqueue([rpath, message_dispatcher, request, response]() {
         // call the API handler
         //LOG(INFO) << "Wait for response " << response.get() << ", action: " << rpath->_get_action();

@@ -1252,6 +1252,11 @@ TEST_F(CollectionAllFieldsTest, DoNotIndexFieldMarkedAsNonIndex) {
     ASSERT_FALSE(res_op.ok());
     ASSERT_EQ("Field `post` is marked as a non-indexed field in the schema.", res_op.error());
 
+    // wildcard pattern should exclude non-indexed field while searching,
+    res_op = coll1->search("Amazon", {"*"}, "", {}, sort_fields, {0}, 10, 1, FREQUENCY, {false});
+    ASSERT_TRUE(res_op.ok());
+    ASSERT_EQ(1, res_op.get()["hits"].size());
+
     // try updating a document with non-indexable field
     doc["post"] = "Some post updated.";
     auto update_op = coll1->add(doc.dump(), UPDATE, "0");
@@ -1557,6 +1562,42 @@ TEST_F(CollectionAllFieldsTest, FieldNameMatchingRegexpShouldNotBeIndexed) {
     ASSERT_EQ(1, results["hits"].size());
 }
 
+TEST_F(CollectionAllFieldsTest, AutoFieldValueCoercionRemoval) {
+    nlohmann::json schema = R"({
+        "name": "coll1",
+        "enable_nested_fields": true,
+        "fields": [
+            {"name": "store", "type": "auto", "optional": true}
+        ]
+    })"_json;
+
+
+    auto coll1 = collectionManager.create_collection(schema).get();
+
+    nlohmann::json doc1;
+    doc1["id"] = "0";
+    doc1["store"]["id"] = 123;
+
+    coll1->add(doc1.dump(), CREATE);
+
+    // string value will be coerced to integer
+    doc1["id"] = "1";
+    doc1["store"]["id"] = "124";
+    coll1->add(doc1.dump(), CREATE);
+
+    // removal should work correctly
+    coll1->remove("1");
+
+    auto results = coll1->search("*", {},
+                                 "store.id: 124", {}, {}, {2}, 10,
+                                 1, FREQUENCY, {true},
+                                 1, spp::sparse_hash_set<std::string>(),
+                                 spp::sparse_hash_set<std::string>(), 10, "", 30, 4, "title", 5, {}, {}, {}, 0,
+                                 "<mark>", "</mark>", {}, 1000, true).get();
+
+    ASSERT_EQ(0, results["found"].get<size_t>());
+}
+
 TEST_F(CollectionAllFieldsTest, FieldNameMatchingRegexpShouldNotBeIndexedInNonAutoSchema) {
     std::vector<field> fields = {field("title", field_types::STRING, false),
                                  field("name.*", field_types::STRING, true, true)};
@@ -1733,3 +1774,210 @@ TEST_F(CollectionAllFieldsTest, InvalidstemValue) {
     ASSERT_EQ("The `stem` property is only allowed for string and string[] fields.", obj_coll_op.error());
 }
 
+TEST_F(CollectionAllFieldsTest, GeopointSortValue) {
+    nlohmann::json schema = R"({
+        "name": "test",
+        "fields": [
+            {"name": "geo", "type": "geopoint", "sort": false}
+        ]
+    })"_json;
+
+    auto create_op = collectionManager.create_collection(schema);
+    ASSERT_FALSE(create_op.ok());
+    ASSERT_EQ("The `sort` property of the field `geo` having `geopoint` type cannot be `false`."
+               " The sort index is used during GeoSearch.", create_op.error());
+
+    schema = R"({
+        "name": "test",
+        "fields": [
+            {"name": "geo_array", "type": "geopoint[]", "sort": false}
+        ]
+    })"_json;
+
+    create_op = collectionManager.create_collection(schema);
+    ASSERT_FALSE(create_op.ok());
+    ASSERT_EQ("The `sort` property of the field `geo_array` having `geopoint[]` type cannot be `false`."
+              " The sort index is used during GeoSearch.", create_op.error());
+
+}
+
+TEST_F(CollectionAllFieldsTest, FieldTokenSeparators) {
+    nlohmann::json schema = R"({
+        "name": "TokenSymbols",
+        "fields": [
+            {"name": "product", "type": "string", "token_separators":["-"], "symbols_to_index":["_"]}
+        ]
+    })"_json;
+
+    auto create_op = collectionManager.create_collection(schema);
+    ASSERT_TRUE(create_op.ok());
+
+    Collection *coll = create_op.get();
+    const auto &fields = coll->get_fields();
+
+    ASSERT_EQ(1, fields.size());
+    ASSERT_EQ(1, fields[0].token_separators.size());
+    ASSERT_EQ('-', fields[0].token_separators.at(0));
+    ASSERT_EQ(1, fields[0].symbols_to_index.size());
+    ASSERT_EQ('_', fields[0].symbols_to_index.at(0));
+
+    //create another collection without fieldwise token separators
+    nlohmann::json schema2 = R"({
+                "name": "TokenSymbols2",
+                "fields": [
+                    {"name": "product", "type": "string"}
+                ]
+            })"_json;
+
+    create_op = collectionManager.create_collection(schema2);
+    ASSERT_TRUE(create_op.ok());
+
+    Collection *coll2 = create_op.get();
+
+    nlohmann::json doc;
+
+    doc["product"] = "Nike-Running Shoe";
+    ASSERT_TRUE(coll->add(doc.dump()).ok());
+    ASSERT_TRUE(coll2->add(doc.dump()).ok());
+
+    doc["product"] = "Adidias_Running_Shoe";
+    ASSERT_TRUE(coll->add(doc.dump()).ok());
+    ASSERT_TRUE(coll2->add(doc.dump()).ok());
+
+    auto res = coll->search("running", {"product"}, "", {}, {}, {2}, 1, 1, FREQUENCY, {true}, 1,
+                            spp::sparse_hash_set<std::string>(),
+                            spp::sparse_hash_set<std::string>(), 5, "", 30, 4, "", 20, {}, {}, {}, 0, "<mark>", "</mark>",
+                            {}, 1000,
+                            true, false, true, "", false, 6000 * 1000, 4, 7, fallback, 4, {off}, 3, 3, 2, 2, false, "",
+                            true, 0, max_score,
+                            100, 0, 4294967295UL, "").get();
+
+    ASSERT_EQ(1, res["hits"].size());
+    ASSERT_EQ("0", res["hits"][0]["document"]["id"]);
+
+    //search in anothe collection without fieldwise token separators
+    res = coll2->search("running", {"product"}, "", {}, {}, {2}, 1, 1, FREQUENCY, {true}, 1,
+                        spp::sparse_hash_set<std::string>(),
+                        spp::sparse_hash_set<std::string>(), 5, "", 30, 4, "", 20, {}, {}, {}, 0, "<mark>", "</mark>", {},
+                        1000,
+                        true, false, true, "", false, 6000 * 1000, 4, 7, fallback, 4, {off}, 3, 3, 2, 2, false, "", true, 0,
+                        max_score,
+                        100, 0, 4294967295UL, "").get();
+
+    ASSERT_EQ(0, res["hits"].size());
+
+    //field level token separators should take presidence over collection level
+    nlohmann::json schema3 = R"({
+                "name": "TokenSymbols3",
+                "fields": [
+                    {"name": "product", "type": "string", "token_separators":["-"]}
+                ],
+                "token_separators":["_"]
+            })"_json;
+
+    create_op = collectionManager.create_collection(schema3);
+    ASSERT_TRUE(create_op.ok());
+
+    Collection *coll3 = create_op.get();
+
+    doc["product"] = "Nike-Running_Shoe";
+    ASSERT_TRUE(coll3->add(doc.dump()).ok());
+
+    doc["product"] = "Nike_Running-Shoe";
+    ASSERT_TRUE(coll3->add(doc.dump()).ok());
+
+    res = coll->search("running", {"product"}, "", {}, {}, {2}, 1, 1, FREQUENCY, {true}, 1,
+                       spp::sparse_hash_set<std::string>(),
+                       spp::sparse_hash_set<std::string>(), 5, "", 30, 4, "", 20, {}, {}, {}, 0, "<mark>", "</mark>", {},
+                       1000,
+                       true, false, true, "", false, 6000 * 1000, 4, 7, fallback, 4, {off}, 3, 3, 2, 2, false, "", true, 0,
+                       max_score,
+                       100, 0, 4294967295UL, "").get();
+
+    ASSERT_EQ(1, res["hits"].size());
+    ASSERT_EQ("0", res["hits"][0]["document"]["id"]); //field token separator works over collection level
+
+    //validation
+
+    //multi char string is not permitted
+    nlohmann::json invalid_schema = R"({
+                "name": "invalid_schema",
+                "fields": [
+                    {"name": "product", "type": "string", "token_separators":["_+#"], "symbols_to_index":["_"]}
+                ]
+            })"_json;
+
+    create_op = collectionManager.create_collection(invalid_schema);
+    ASSERT_FALSE(create_op.ok());
+    ASSERT_EQ("The `token_separators` must be an array of characters.", create_op.error());
+
+    //non string vals not permitted
+    invalid_schema = R"({
+                    "name": "invalid_schema",
+                    "fields": [
+                        {"name": "product", "type": "string", "token_separators":["_"], "symbols_to_index":[1]}
+                    ]
+                })"_json;
+
+    create_op = collectionManager.create_collection(invalid_schema);
+    ASSERT_FALSE(create_op.ok());
+    ASSERT_EQ("The `symbols_to_index` must be an array of characters.", create_op.error());
+}
+
+TEST_F(CollectionAllFieldsTest, FieldTokenSeparatorsOnRestart) {
+    nlohmann::json schema = R"({
+        "name": "TokenSymbols",
+        "fields": [
+            {"name": "product", "type": "string", "token_separators":["-"], "symbols_to_index":["_"]},
+            {"name": "desc", "type": "string", "token_separators":["&"], "symbols_to_index":["$"]}
+        ]
+    })"_json;
+
+    auto create_op = collectionManager.create_collection(schema);
+    ASSERT_TRUE(create_op.ok());
+
+    Collection* collection = create_op.get();
+
+    auto fields = collection->get_fields();
+
+    ASSERT_EQ(2, fields.size());
+    ASSERT_EQ("product", fields[0].name);
+    ASSERT_EQ(1, fields[0].token_separators.size());
+    ASSERT_EQ('-', fields[0].token_separators[0]);
+    ASSERT_EQ(1, fields[0].symbols_to_index.size());
+    ASSERT_EQ('_', fields[0].symbols_to_index[0]);
+
+    ASSERT_EQ("desc", fields[1].name);
+    ASSERT_EQ(1, fields[1].token_separators.size());
+    ASSERT_EQ('&', fields[1].token_separators[0]);
+    ASSERT_EQ(1, fields[1].symbols_to_index.size());
+    ASSERT_EQ('$', fields[1].symbols_to_index[0]);
+
+    //dispose collection manager and reload
+    collectionManager.dispose();
+    delete store;
+    fields.clear();
+
+    std::string state_dir_path = "/tmp/typesense_test/collection_all_fields";
+    store = new Store(state_dir_path);
+
+    collectionManager.init(store, 1.0, "auth_key", quit);
+    collectionManager.load(8, 1000);
+
+    collection = collectionManager.get_collection("TokenSymbols").get();
+
+    fields = collection->get_fields();
+
+    ASSERT_EQ(2, fields.size());
+    ASSERT_EQ("product", fields[0].name);
+    ASSERT_EQ(1, fields[0].token_separators.size());
+    ASSERT_EQ('-', fields[0].token_separators[0]);
+    ASSERT_EQ(1, fields[0].symbols_to_index.size());
+    ASSERT_EQ('_', fields[0].symbols_to_index[0]);
+
+    ASSERT_EQ("desc", fields[1].name);
+    ASSERT_EQ(1, fields[1].token_separators.size());
+    ASSERT_EQ('&', fields[1].token_separators[0]);
+    ASSERT_EQ(1, fields[1].symbols_to_index.size());
+    ASSERT_EQ('$', fields[1].symbols_to_index[0]);
+}

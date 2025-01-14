@@ -7,9 +7,11 @@
 #include <file_utils.h>
 #include <collection_manager.h>
 #include <http_client.h>
+#include <conversation_model_manager.h>
 #include "rocksdb/utilities/checkpoint.h"
 #include "thread_local_vars.h"
 #include "core_api.h"
+#include "personalization_model_manager.h"
 
 namespace braft {
     DECLARE_int32(raft_do_snapshot_min_index_gap);
@@ -248,8 +250,7 @@ void ReplicationState::write(const std::shared_ptr<http_req>& request, const std
     auto resource_check = cached_resource_stat_t::get_instance().has_enough_resources(raft_dir_path,
                                   config->get_disk_used_max_percentage(), config->get_memory_used_max_percentage());
 
-    if (resource_check != cached_resource_stat_t::OK &&
-        request->http_method != "DELETE" && request->path_without_query != "/health") {
+    if (resource_check != cached_resource_stat_t::OK && request->do_resource_check()) {
         response->set_422("Rejecting write: running out of resource type: " +
                           std::string(magic_enum::enum_name(resource_check)));
         response->final = true;
@@ -268,14 +269,15 @@ void ReplicationState::write(const std::shared_ptr<http_req>& request, const std
     bool route_found = server->get_route(request->route_hash, &rpath);
 
     if(route_found && rpath->handler == patch_update_collection) {
-        if(get_alter_in_progress()) {
+        if(get_alter_in_progress(request->params["collection"])) {
+            // This is checked only during live writes from a http request: we do this because we want to only
+            // throttle concurrent successive alter requests, but want to allow an alter that happens after another
+            // finishes via raft log replay.
             response->set_422("Another collection update operation is in progress.");
             response->final = true;
             auto req_res = new async_req_res_t(request, response, true);
             return message_dispatcher->send_message(HttpServer::STREAM_RESPONSE_MESSAGE, req_res);
         }
-
-        set_alter_in_progress(true);
     }
 
     std::shared_lock lock(node_mutex);
@@ -507,41 +509,11 @@ void* ReplicationState::save_snapshot(void* arg) {
         }
     }
 
-    const std::string& temp_snapshot_dir = sa->writer->get_path();
-
     sa->done->Run();
-
-    // if an external snapshot is requested, copy latest snapshot directory into that
-    if(!sa->ext_snapshot_path.empty()) {
-        // temp directory will be moved to final snapshot directory, so let's wait for that to happen
-        while(butil::DirectoryExists(butil::FilePath(temp_snapshot_dir))) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-
-        LOG(INFO) << "Copying system snapshot to external snapshot directory at " << sa->ext_snapshot_path;
-
-        const butil::FilePath& dest_state_dir = butil::FilePath(sa->ext_snapshot_path + "/state");
-
-        if(!butil::DirectoryExists(dest_state_dir)) {
-            butil::CreateDirectory(dest_state_dir, true);
-        }
-
-        const butil::FilePath& src_snapshot_dir = butil::FilePath(sa->state_dir_path + "/snapshot");
-        const butil::FilePath& src_meta_dir = butil::FilePath(sa->state_dir_path + "/meta");
-
-        bool snapshot_copied = butil::CopyDirectory(src_snapshot_dir, dest_state_dir, true);
-        bool meta_copied = butil::CopyDirectory(src_meta_dir, dest_state_dir, true);
-
-        sa->replication_state->ext_snapshot_succeeded = snapshot_copied && meta_copied;
-
-        // notify on demand closure that external snapshotting is done
-        sa->replication_state->notify();
-    }
 
     // NOTE: *must* do a dummy write here since snapshots cannot be triggered if no write has happened since the
     // last snapshot. By doing a dummy write right after a snapshot, we ensure that this can never be the case.
     sa->replication_state->do_dummy_write();
-    sa->replication_state->snapshot_in_progress = false;
 
     LOG(INFO) << "save_snapshot done";
 
@@ -579,7 +551,9 @@ void ReplicationState::on_snapshot_save(braft::SnapshotWriter* writer, braft::Cl
         }
 
         if(analytics_store) {
-            analytics_store->insert(BATCHED_INDEXER_STATE_KEY, batch_index_state.dump());
+            // to ensure that in-memory table is sent to disk (we don't use WAL)
+            analytics_store->flush();
+
             rocksdb::Checkpoint* checkpoint2 = nullptr;
             status = analytics_store->create_check_point(&checkpoint2, analytics_db_snapshot_path);
             std::unique_ptr<rocksdb::Checkpoint> checkpoint_guard(checkpoint2);
@@ -604,7 +578,6 @@ void ReplicationState::on_snapshot_save(braft::SnapshotWriter* writer, braft::Cl
 
     if(!ext_snapshot_path.empty()) {
         arg->ext_snapshot_path = ext_snapshot_path;
-        ext_snapshot_path = "";
     }
 
     // Start a new bthread to avoid blocking StateMachine for slower operations that don't need a blocking view
@@ -626,6 +599,14 @@ int ReplicationState::init_db() {
         return 1;
     }
 
+    // important to init conversation models only after all collections have been loaded
+    auto conversation_models_init = ConversationModelManager::init(store);
+    if(!conversation_models_init.ok()) {
+        LOG(INFO) << "Failed to initialize conversation model manager: " << conversation_models_init.error();
+    } else {
+        LOG(INFO) << "Loaded " << conversation_models_init.get() << "conversation model(s).";
+    }
+
     if(batched_indexer != nullptr) {
         LOG(INFO) << "Initializing batched indexer from snapshot state...";
         std::string batched_indexer_state_str;
@@ -634,6 +615,13 @@ int ReplicationState::init_db() {
             nlohmann::json batch_indexer_state = nlohmann::json::parse(batched_indexer_state_str);
             batched_indexer->load_state(batch_indexer_state);
         }
+    }
+
+    auto personalization_models_init = PersonalizationModelManager::init(store);
+    if(!personalization_models_init.ok()) {
+        LOG(INFO) << "Failed to initialize personalization model manager: " << personalization_models_init.error();
+    } else {
+        LOG(INFO) << "Loaded " << personalization_models_init.get() << " personalization model(s).";
     }
 
     return 0;
@@ -651,21 +639,23 @@ int ReplicationState::on_snapshot_load(braft::SnapshotReader* reader) {
     write_caught_up = false;
 
     // Load snapshot from leader, replacing the running StateMachine
-    std::string snapshot_path = reader->get_path();
+    std::string analytics_snapshot_path = reader->get_path();
+    analytics_snapshot_path.append(std::string("/") + analytics_db_snapshot_name);
 
-    if(analytics_store) {
-        snapshot_path.append(std::string("/") + analytics_db_snapshot_name);
-        int reload_store = analytics_store->reload(true, snapshot_path);
+    if(analytics_store && directory_exists(analytics_snapshot_path)) {
+        // analytics db snapshot could be missing (older version or disabled earlier)
+        int reload_store = analytics_store->reload(true, analytics_snapshot_path,
+                                                   Config::get_instance().get_analytics_db_ttl());
         if (reload_store != 0) {
             LOG(ERROR) << "Failed to reload analytics db snapshot.";
             return reload_store;
         }
     }
 
-    snapshot_path = reader->get_path();
-    snapshot_path.append(std::string("/") + db_snapshot_name);
+    std::string db_snapshot_path = reader->get_path();
+    db_snapshot_path.append(std::string("/") + db_snapshot_name);
 
-    int reload_store = store->reload(true, snapshot_path);
+    int reload_store = store->reload(true, db_snapshot_path);
     if(reload_store != 0) {
         return reload_store;
     }
@@ -881,10 +871,12 @@ void ReplicationState::do_snapshot(const std::string& snapshot_path, const std::
         return ;
     }
 
-    LOG(INFO) << "Triggering an on demand snapshot...";
+    LOG(INFO) << "Triggering an on demand snapshot"
+              << (!snapshot_path.empty() ? " with external snapshot path..." : "...");
 
     thread_pool->enqueue([&snapshot_path, req, res, this]() {
-        OnDemandSnapshotClosure* snapshot_closure = new OnDemandSnapshotClosure(this, req, res);
+        OnDemandSnapshotClosure* snapshot_closure = new OnDemandSnapshotClosure(this, req, res, snapshot_path,
+                                                                                raft_dir_path);
         ext_snapshot_path = snapshot_path;
         std::shared_lock lock(this->node_mutex);
         node->snapshot(snapshot_closure);
@@ -895,8 +887,8 @@ void ReplicationState::set_ext_snapshot_path(const std::string& snapshot_path) {
     this->ext_snapshot_path = snapshot_path;
 }
 
-const std::string &ReplicationState::get_ext_snapshot_path() const {
-    return ext_snapshot_path;
+void ReplicationState::set_snapshot_in_progress(const bool snapshot_in_progress) {
+    this->snapshot_in_progress = snapshot_in_progress;
 }
 
 void ReplicationState::do_dummy_write() {
@@ -1106,10 +1098,6 @@ void ReplicationState::do_snapshot(const std::string& nodes) {
     last_snapshot_ts = current_ts;
 }
 
-bool ReplicationState::get_ext_snapshot_succeeded() {
-    return ext_snapshot_succeeded;
-}
-
 std::string ReplicationState::get_leader_url() const {
     std::shared_lock lock(node_mutex);
 
@@ -1149,8 +1137,28 @@ void OnDemandSnapshotClosure::Run() {
     // Auto delete this after Done()
     std::unique_ptr<OnDemandSnapshotClosure> self_guard(this);
 
-    replication_state->wait(); // until on demand snapshotting completes
+    bool ext_snapshot_succeeded = false;
+
+    // if an external snapshot is requested, copy latest snapshot directory into that
+    if(!ext_snapshot_path.empty()) {
+        const butil::FilePath& dest_state_dir = butil::FilePath(ext_snapshot_path + "/state");
+
+        if(!butil::DirectoryExists(dest_state_dir)) {
+            butil::CreateDirectory(dest_state_dir, true);
+        }
+
+        const butil::FilePath& src_snapshot_dir = butil::FilePath(state_dir_path + "/snapshot");
+        const butil::FilePath& src_meta_dir = butil::FilePath(state_dir_path + "/meta");
+
+        bool snapshot_copied = butil::CopyDirectory(src_snapshot_dir, dest_state_dir, true);
+        bool meta_copied = butil::CopyDirectory(src_meta_dir, dest_state_dir, true);
+
+        ext_snapshot_succeeded = snapshot_copied && meta_copied;
+    }
+
+    // order is important, because the atomic boolean guards write to the path
     replication_state->set_ext_snapshot_path("");
+    replication_state->set_snapshot_in_progress(false);
 
     req->last_chunk_aggregate = true;
     res->final = true;
@@ -1158,20 +1166,21 @@ void OnDemandSnapshotClosure::Run() {
     nlohmann::json response;
     uint32_t status_code;
 
-    if(status().ok() && replication_state->get_ext_snapshot_succeeded()) {
-        LOG(INFO) << "On demand snapshot succeeded!";
-        status_code = 201;
-        response["success"] = true;
-    } else {
-        LOG(ERROR) << "On demand snapshot failed, error: ";
-        if(replication_state->get_ext_snapshot_succeeded()) {
-            LOG(ERROR) << status().error_str() << ", code: " << status().error_code();
-        } else {
-            LOG(ERROR) << "Copy failed.";
-        }
+    if(!status().ok()) {
+        // in case of internal raft error
+        LOG(ERROR) << "On demand snapshot failed, error: " << status().error_str() << ", code: " << status().error_code();
         status_code = 500;
         response["success"] = false;
         response["error"] = status().error_str();
+    } else if(!ext_snapshot_succeeded && !ext_snapshot_path.empty()) {
+        LOG(ERROR) << "On demand snapshot failed, error: copy failed.";
+        status_code = 500;
+        response["success"] = false;
+        response["error"] = "Copy failed.";
+    } else {
+        LOG(INFO) << "On demand snapshot succeeded!";
+        status_code = 201;
+        response["success"] = true;
     }
 
     res->status_code = status_code;

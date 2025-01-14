@@ -8,6 +8,14 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+config_setting(
+    name = "linux_arm64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:arm64",
+    ],
+)
+
 configure_make(
     name = "jemalloc",
     args = ["-j8"],
@@ -17,6 +25,10 @@ configure_make(
             "AR": "",
         },
         "//conditions:default": {},
+    }),
+    configure_options = select({
+        ":linux_arm64": ["--disable-cache-oblivious"],
+        "//conditions:default": ["--disable-cache-oblivious"],
     }),
     lib_source = ":all_srcs",
     out_include_dir = "include/jemalloc",

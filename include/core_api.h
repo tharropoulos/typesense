@@ -9,9 +9,7 @@ bool handle_authentication(std::map<std::string, std::string>& req_params,
                            const std::string& body, const route_path& rpath,
                            const std::string& req_auth_key);
 
-void set_alter_in_progress(bool in_progress);
-
-bool get_alter_in_progress();
+bool get_alter_in_progress(const std::string& collection);
 
 // Collections
 
@@ -171,6 +169,19 @@ bool put_upsert_analytics_rules(const std::shared_ptr<http_req>& req, const std:
 
 bool del_analytics_rules(const std::shared_ptr<http_req>& req, const std::shared_ptr<http_res>& res);
 
+bool post_write_analytics_to_db(const std::shared_ptr<http_req>& req, const std::shared_ptr<http_res>& res);
+
+bool get_analytics_events(const std::shared_ptr<http_req>& req, const std::shared_ptr<http_res>& res);
+
+//plurals, nouns
+bool post_import_stemming_dictionary(const std::shared_ptr<http_req>& req, const std::shared_ptr<http_res>& res);
+
+bool get_stemming_dictionaries(const std::shared_ptr<http_req>& req, const std::shared_ptr<http_res>& res);
+
+bool get_stemming_dictionary(const std::shared_ptr<http_req>& req, const std::shared_ptr<http_res>& res);
+
+bool del_stemming_dictionary(const std::shared_ptr<http_req>& req, const std::shared_ptr<http_res>& res);
+
 // Misc helpers
 
 void get_collections_for_auth(std::map<std::string, std::string>& req_params, const std::string& body,
@@ -196,13 +207,6 @@ void init_api(uint32_t cache_num_entries);
 bool post_proxy(const std::shared_ptr<http_req>& req, const std::shared_ptr<http_res>& res);
 
 
-bool get_conversations(const std::shared_ptr<http_req>& req, const std::shared_ptr<http_res>& res);
-
-bool get_conversation(const std::shared_ptr<http_req>& req, const std::shared_ptr<http_res>& res);
-
-bool del_conversation(const std::shared_ptr<http_req>& req, const std::shared_ptr<http_res>& res);
-
-bool put_conversation(const std::shared_ptr<http_req>& req, const std::shared_ptr<http_res>& res);
 
 
 bool post_conversation_model(const std::shared_ptr<http_req>& req, const std::shared_ptr<http_res>& res);
@@ -214,3 +218,13 @@ bool del_conversation_model(const std::shared_ptr<http_req>& req, const std::sha
 bool get_conversation_models(const std::shared_ptr<http_req>& req, const std::shared_ptr<http_res>& res);
 
 bool put_conversation_model(const std::shared_ptr<http_req>& req, const std::shared_ptr<http_res>& res);
+
+bool post_personalization_model(const std::shared_ptr<http_req>& req, const std::shared_ptr<http_res>& res);
+
+bool get_personalization_model(const std::shared_ptr<http_req>& req, const std::shared_ptr<http_res>& res);
+
+bool del_personalization_model(const std::shared_ptr<http_req>& req, const std::shared_ptr<http_res>& res);
+
+bool get_personalization_models(const std::shared_ptr<http_req>& req, const std::shared_ptr<http_res>& res);
+
+bool put_personalization_model(const std::shared_ptr<http_req>& req, const std::shared_ptr<http_res>& res);

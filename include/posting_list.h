@@ -20,6 +20,8 @@ struct result_iter_state_t {
     size_t excluded_result_ids_index = 0;
     size_t filter_ids_index = 0;
 
+    size_t num_keyword_matches = 0;
+
     filter_result_iterator_t* fit = nullptr;
 
     result_iter_state_t() = default;
@@ -203,9 +205,18 @@ public:
 
     static bool is_single_token_verbatim_match(const posting_list_t::iterator_t& it, bool field_is_array);
 
+    static bool is_single_token_prefix_match(const posting_list_t::iterator_t& it, bool field_is_array);
+
+    static void get_prefix_matches(std::vector<iterator_t>& its, const bool field_is_array,
+                                   const uint32_t* ids, const uint32_t num_ids,
+                                   uint32_t*& prefix_ids, size_t& num_prefix_ids);
+
     static void get_exact_matches(std::vector<iterator_t>& its, bool field_is_array,
                                   const uint32_t* ids, const uint32_t num_ids,
                                   uint32_t*& exact_ids, size_t& num_exact_ids);
+
+    static bool has_prefix_match(std::vector<posting_list_t::iterator_t>& posting_list_iterators,
+                                 const bool field_is_array);
 
     static bool has_exact_match(std::vector<posting_list_t::iterator_t>& posting_list_iterators,
                                   const bool field_is_array);

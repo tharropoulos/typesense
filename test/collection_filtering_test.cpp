@@ -8,6 +8,7 @@
 
 class CollectionFilteringTest : public ::testing::Test {
 protected:
+    std::string state_dir_path = "/tmp/typesense_test/collection_filtering";
     Store *store;
     CollectionManager & collectionManager = CollectionManager::get_instance();
     std::atomic<bool> quit = false;
@@ -16,7 +17,6 @@ protected:
     std::vector<sort_by> sort_fields;
 
     void setupCollection() {
-        std::string state_dir_path = "/tmp/typesense_test/collection_filtering";
         LOG(INFO) << "Truncating and creating: " << state_dir_path;
         system(("rm -rf "+state_dir_path+" && mkdir -p "+state_dir_path).c_str());
 
@@ -77,6 +77,9 @@ TEST_F(CollectionFilteringTest, FilterOnTextFields) {
 
     results = coll_array_fields->search("Jeremy", query_fields, "tags : fine PLATINUM", facets, sort_fields, {0}, 10, 1, FREQUENCY, {false}).get();
     ASSERT_EQ(1, results["hits"].size());
+
+    results = coll_array_fields->search("Jeremy", query_fields, "tags : foobarbaz", facets, sort_fields, {0}, 10, 1, FREQUENCY, {false}).get();
+    ASSERT_EQ(0, results["hits"].size());
 
     // using just ":", filtering should return documents that contain ALL tokens in the filter expression
     results = coll_array_fields->search("Jeremy", query_fields, "tags : PLATINUM", facets, sort_fields, {0}, 10, 1, FREQUENCY, {false}).get();
@@ -139,6 +142,77 @@ TEST_F(CollectionFilteringTest, FilterOnTextFields) {
     ASSERT_EQ("Error with filter field `tags`: Filter value cannot be empty.", res_op.error());
 
     collectionManager.drop_collection("coll_array_fields");
+
+    auto schema_json =
+            R"({
+                "name": "title",
+                "fields": [
+                    {"name": "title", "type": "string"},
+                    {"name": "titles", "type": "string[]"}
+                ]
+            })"_json;
+
+    std::vector<nlohmann::json> documents = {
+            R"({
+                "title": "foo bar baz",
+                "titles": []
+            })"_json,
+            R"({
+                "title": "foo bar baz",
+                "titles": ["foo bar baz"]
+            })"_json,
+            R"({
+                "title": "foo bar baz",
+                "titles": ["bar foo baz", "foo bar baz"]
+            })"_json,
+            R"({
+                "title": "bar foo baz",
+                "titles": ["bar foo baz"]
+            })"_json,
+    };
+
+    auto collection_create_op = collectionManager.create_collection(schema_json);
+    ASSERT_TRUE(collection_create_op.ok());
+    for (auto const &json: documents) {
+        auto add_op = collection_create_op.get()->add(json.dump());
+        ASSERT_TRUE(add_op.ok());
+    }
+
+    std::map<std::string, std::string> req_params = {
+            {"collection", "title"},
+            {"q", "foo"},
+            {"query_by", "title"},
+            {"filter_by", "title:= foo bar baz"}
+    };
+    nlohmann::json embedded_params;
+    std::string json_res;
+    auto now_ts = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+
+    auto search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+
+    auto res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(3, res_obj["found"].get<size_t>());
+    ASSERT_EQ(3, res_obj["hits"].size());
+    ASSERT_EQ("2", res_obj["hits"][0]["document"].at("id"));
+    ASSERT_EQ("1", res_obj["hits"][1]["document"].at("id"));
+    ASSERT_EQ("0", res_obj["hits"][2]["document"].at("id"));
+
+    req_params = {
+            {"collection", "title"},
+            {"q", "foo"},
+            {"query_by", "titles"},
+            {"filter_by", "titles:= foo bar baz"}
+    };
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(2, res_obj["found"].get<size_t>());
+    ASSERT_EQ(2, res_obj["hits"].size());
+    ASSERT_EQ("2", res_obj["hits"][0]["document"].at("id"));
+    ASSERT_EQ("1", res_obj["hits"][1]["document"].at("id"));
 }
 
 TEST_F(CollectionFilteringTest, FacetFieldStringFiltering) {
@@ -477,6 +551,11 @@ TEST_F(CollectionFilteringTest, FilterAndQueryFieldRestrictions) {
     ASSERT_EQ(false, result_op.ok());
     ASSERT_STREQ("Error with filter field `points`: Numerical field has an invalid comparator.", result_op.error().c_str());
 
+    result_op = coll_mul_fields->search("captain", query_fields, "points:<= foo", facets, sort_fields, {0}, 10, 1,
+                                        FREQUENCY, {false});
+    ASSERT_FALSE(result_op.ok());
+    ASSERT_EQ("Error with filter field `points`: Not an int32.", result_op.error());
+
     // bad filter value type - equaling float on an integer field
     result_op = coll_mul_fields->search("captain", query_fields, "points: 100.34", facets, sort_fields, {0}, 10, 1,
                                         FREQUENCY, {false});
@@ -493,7 +572,12 @@ TEST_F(CollectionFilteringTest, FilterAndQueryFieldRestrictions) {
     result_op = coll_mul_fields->search("captain", query_fields, "points: <2230070399", facets, sort_fields, {0}, 10, 1,
                                         FREQUENCY, {false});
     ASSERT_EQ(false, result_op.ok());
-    ASSERT_STREQ("Error with filter field `points`: Not an int32.", result_op.error().c_str());
+    ASSERT_EQ("Error with filter field `points`: `2230070399` exceeds the range of an int32.", result_op.error());
+
+    result_op = coll_mul_fields->search("captain", query_fields, "points:<= 9223372036854775808", facets, sort_fields, {0}, 10, 1,
+                                        FREQUENCY, {false});
+    ASSERT_FALSE(result_op.ok());
+    ASSERT_EQ("Error with filter field `points`: `9223372036854775808` exceeds the range of an int32.", result_op.error());
 
     // using a string filter value against an integer field
     result_op = coll_mul_fields->search("captain", query_fields, "points: <sdsdfsdf", facets, sort_fields, {0}, 10, 1,
@@ -622,6 +706,17 @@ TEST_F(CollectionFilteringTest, FilterOnNumericFields) {
         std::string result_id = result["document"]["id"];
         std::string id = ids.at(i);
         ASSERT_STREQ(id.c_str(), result_id.c_str());
+    }
+
+    results = coll_array_fields->search("Jeremy", query_fields, "age:!= 0", facets, sort_fields, {0}, 10, 1, FREQUENCY, {false}).get();
+    ASSERT_EQ(5, results["hits"].size());
+
+    ids = {"3", "1", "4", "0", "2"};
+    for(size_t i = 0; i < results["hits"].size(); i++) {
+        nlohmann::json result = results["hits"].at(i);
+        std::string result_id = result["document"]["id"];
+        std::string id = ids.at(i);
+        ASSERT_EQ(id, result_id);
     }
 
     // multiple filters
@@ -892,6 +987,17 @@ TEST_F(CollectionFilteringTest, FilterOnFloatFields) {
     ASSERT_EQ(2, results["hits"].size());
 
     ids = {"2", "4"};
+    for(size_t i = 0; i < results["hits"].size(); i++) {
+        nlohmann::json result = results["hits"].at(i);
+        std::string result_id = result["document"]["id"];
+        std::string id = ids.at(i);
+        ASSERT_EQ(id, result_id);
+    }
+
+    results = coll_array_fields->search("Jeremy", query_fields, "rating: [!= 1]", facets, sort_fields_desc, {0}, 10, 1, FREQUENCY, {false}).get();
+    ASSERT_EQ(5, results["hits"].size());
+
+    ids = {"1", "2", "4", "0", "3"};
     for(size_t i = 0; i < results["hits"].size(); i++) {
         nlohmann::json result = results["hits"].at(i);
         std::string result_id = result["document"]["id"];
@@ -1318,6 +1424,10 @@ TEST_F(CollectionFilteringTest, FilteringViaDocumentIds) {
     ASSERT_FALSE(res_op.ok());
     ASSERT_EQ("Error with filter field `id`: Filter value cannot be empty.", res_op.error());
 
+    res_op = coll1->search("*", {}, "id: ``", {}, sort_fields, {0}, 10, 1, FREQUENCY, {true});
+    ASSERT_FALSE(res_op.ok());
+    ASSERT_EQ("Error with filter field `id`: Filter value cannot be empty.", res_op.error());
+
     // when no IDs exist
     results = coll1->search("*",
                             {}, "id: [1000] && num_employees: <300",
@@ -1337,6 +1447,25 @@ TEST_F(CollectionFilteringTest, FilteringViaDocumentIds) {
                             {}, sort_fields, {0}, 10, 1, FREQUENCY, {true}).get();
 
     ASSERT_EQ(4, results["found"].get<size_t>());
+
+    results = coll1->search("*",
+                            {}, "id:= [*]",
+                            {}, sort_fields, {0}, 10, 1, FREQUENCY, {true}).get();
+
+    ASSERT_EQ(4, results["found"].get<size_t>());
+
+    // match no IDs
+    results = coll1->search("*",
+                            {}, "id: != *",
+                            {}, sort_fields, {0}, 10, 1, FREQUENCY, {true}).get();
+
+    ASSERT_EQ(0, results["found"].get<size_t>());
+
+    results = coll1->search("*",
+                            {}, "id: != [*]",
+                            {}, sort_fields, {0}, 10, 1, FREQUENCY, {true}).get();
+
+    ASSERT_EQ(0, results["found"].get<size_t>());
 
     collectionManager.drop_collection("coll1");
 }
@@ -1483,6 +1612,9 @@ TEST_F(CollectionFilteringTest, NegationOperatorBasics) {
     results = coll1->search("*", {"artist"}, "artist:![Swift, Jackson]", {}, {}, {0}, 10, 1, FREQUENCY, {true}, 10).get();
     ASSERT_EQ(0, results["found"]);
 
+    results = coll1->search("*", {"artist"}, "artist:!=[]", {}, {}, {0}, 10, 1, FREQUENCY, {true}, 10).get();
+    ASSERT_EQ(4, results["found"]);
+
     // empty value (bad filtering)
     auto res_op = coll1->search("*", {"artist"}, "artist:!=", {}, {}, {0}, 10, 1, FREQUENCY, {true}, 10);
     ASSERT_FALSE(res_op.ok());
@@ -1499,10 +1631,6 @@ TEST_F(CollectionFilteringTest, NegationOperatorBasics) {
     res_op = coll1->search("*", {"artist"}, "artist:!=[`foo`, ``]", {}, {}, {0}, 10, 1, FREQUENCY, {true}, 10);
     ASSERT_FALSE(res_op.ok());
     ASSERT_EQ("Error with filter field `artist`: Filter value cannot be empty.", res_op.error());
-
-    res_op = coll1->search("*", {"artist"}, "artist:!=[]", {}, {}, {0}, 10, 1, FREQUENCY, {true}, 10);
-    ASSERT_FALSE(res_op.ok());
-    ASSERT_EQ("Error with filter field `artist`: Filter value array cannot be empty.", res_op.error());
 
     collectionManager.drop_collection("coll1");
 }
@@ -1566,6 +1694,11 @@ TEST_F(CollectionFilteringTest, FilterStringsWithComma) {
 
     ASSERT_EQ(1, results["found"].get<size_t>());
     ASSERT_STREQ("0", results["hits"][0]["document"]["id"].get<std::string>().c_str());
+
+    results = coll1->search("*", {"place"}, "place: []", {}, {}, {0}, 10, 1,
+                            FREQUENCY, {true}, 10).get();
+
+    ASSERT_EQ(0, results["found"].get<size_t>());
 
     collectionManager.drop_collection("coll1");
 }
@@ -2204,7 +2337,33 @@ TEST_F(CollectionFilteringTest, ComplexFilterQuery) {
     search_op = coll->search("Jeremy", {"name"}, extreme_filter,
                              {}, sort_fields_desc, {0}, 10, 1, FREQUENCY, {false});
     ASSERT_FALSE(search_op.ok());
-    ASSERT_EQ("`filter_by` has too many operations.", search_op.error());
+    ASSERT_EQ("`filter_by` has too many operations. Maximum allowed: 100. Use `--filter-by-max-ops` command line "
+              "argument to customize this value.", search_op.error());
+
+    collectionManager.dispose();
+    delete store;
+
+    store = new Store(state_dir_path);
+    collectionManager.init(store, 1.0, "auth_key", quit, 109); // Re-initialize with 109 filter operations allowed.
+    auto load_op = collectionManager.load(8, 1000);
+
+    if(!load_op.ok()) {
+        LOG(ERROR) << load_op.error();
+    }
+    ASSERT_TRUE(load_op.ok());
+
+    coll = collectionManager.get_collection_unsafe("ComplexFilterQueryCollection");
+    search_op = coll->search("Jeremy", {"name"}, extreme_filter,
+                                  {}, sort_fields_desc, {0}, 10, 1, FREQUENCY, {false});
+    ASSERT_TRUE(search_op.ok());
+    ASSERT_EQ(1, search_op.get()["hits"].size());
+
+    extreme_filter += "|| (years:>2000 && ((age:<30 && rating:>5) || (age:>50 && rating:<5)))";
+    search_op = coll->search("Jeremy", {"name"}, extreme_filter,
+                             {}, sort_fields_desc, {0}, 10, 1, FREQUENCY, {false});
+    ASSERT_FALSE(search_op.ok());
+    ASSERT_EQ("`filter_by` has too many operations. Maximum allowed: 109. Use `--filter-by-max-ops` command line "
+              "argument to customize this value.", search_op.error());
 
     collectionManager.drop_collection("ComplexFilterQueryCollection");
 }
@@ -2458,4 +2617,690 @@ TEST_F(CollectionFilteringTest, PrefixFilterOnTextFields) {
         std::string id = ids.at(i);
         ASSERT_EQ(id, result_id);
     }
+
+    auto schema_json =
+            R"({
+                "name": "Names",
+                "fields": [
+                    {"name": "name", "type": "string", "optional": true},
+                    {"name": "names", "type": "string[]", "optional": true}
+                ]
+            })"_json;
+    std::vector<nlohmann::json> documents = {
+            R"({
+                "name": "Steve Jobs"
+            })"_json,
+            R"({
+                "name": "Adam Stator"
+            })"_json,
+    };
+
+    auto collection_create_op = collectionManager.create_collection(schema_json);
+    ASSERT_TRUE(collection_create_op.ok());
+    for (auto const &json: documents) {
+        auto add_op = collection_create_op.get()->add(json.dump());
+        ASSERT_TRUE(add_op.ok());
+    }
+
+    std::map<std::string, std::string> req_params = {
+            {"collection", "Names"},
+            {"q", "*"},
+            {"query_by", "name"},
+            {"filter_by", "name:= S*"}
+    };
+    nlohmann::json embedded_params;
+    std::string json_res;
+    auto now_ts = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+
+    auto search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+
+    auto res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(1, res_obj["found"].get<size_t>());
+    ASSERT_EQ(1, res_obj["hits"].size());
+    ASSERT_EQ("Steve Jobs", res_obj["hits"][0]["document"].at("name"));
+
+    req_params = {
+            {"collection", "Names"},
+            {"q", "*"},
+            {"query_by", "name"},
+            {"filter_by", "name: S*"}
+    };
+
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(2, res_obj["found"].get<size_t>());
+    ASSERT_EQ(2, res_obj["hits"].size());
+    ASSERT_EQ("Adam Stator", res_obj["hits"][0]["document"].at("name"));
+    ASSERT_EQ("Steve Jobs", res_obj["hits"][1]["document"].at("name"));
+
+    documents = {
+            R"({
+                "name": "Steve Reiley"
+            })"_json,
+            R"({
+                "name": "Storm"
+            })"_json,
+            R"({
+                "name": "Steve Rogers"
+            })"_json,
+    };
+
+    for (auto const &json: documents) {
+        auto add_op = collection_create_op.get()->add(json.dump());
+        ASSERT_TRUE(add_op.ok());
+    }
+
+    req_params = {
+            {"collection", "Names"},
+            {"q", "s"},
+            {"query_by", "name"},
+            {"filter_by", "name:= St*"}
+    };
+
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(4, res_obj["found"].get<size_t>());
+    ASSERT_EQ(4, res_obj["hits"].size());
+    ASSERT_EQ("Steve Rogers", res_obj["hits"][0]["document"].at("name"));
+    ASSERT_EQ("Storm", res_obj["hits"][1]["document"].at("name"));
+    ASSERT_EQ("Steve Reiley", res_obj["hits"][2]["document"].at("name"));
+    ASSERT_EQ("Steve Jobs", res_obj["hits"][3]["document"].at("name"));
+
+    req_params = {
+            {"collection", "Names"},
+            {"q", "s"},
+            {"query_by", "name"},
+            {"filter_by", "name: St*"}
+    };
+
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(5, res_obj["found"].get<size_t>());
+    ASSERT_EQ(5, res_obj["hits"].size());
+    ASSERT_EQ("Steve Rogers", res_obj["hits"][0]["document"].at("name"));
+    ASSERT_EQ("Storm", res_obj["hits"][1]["document"].at("name"));
+    ASSERT_EQ("Steve Reiley", res_obj["hits"][2]["document"].at("name"));
+    ASSERT_EQ("Adam Stator", res_obj["hits"][3]["document"].at("name"));
+    ASSERT_EQ("Steve Jobs", res_obj["hits"][4]["document"].at("name"));
+
+    req_params = {
+            {"collection", "Names"},
+            {"q", "s"},
+            {"query_by", "name"},
+            {"filter_by", "name:= Steve R*"}
+    };
+
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(2, res_obj["found"].get<size_t>());
+    ASSERT_EQ(2, res_obj["hits"].size());
+    ASSERT_EQ("Steve Rogers", res_obj["hits"][0]["document"].at("name"));
+    ASSERT_EQ("Steve Reiley", res_obj["hits"][1]["document"].at("name"));
+
+    req_params = {
+            {"collection", "Names"},
+            {"q", "s"},
+            {"query_by", "name"},
+            {"filter_by", "name: Steve R*"}
+    };
+
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(2, res_obj["found"].get<size_t>());
+    ASSERT_EQ(2, res_obj["hits"].size());
+    ASSERT_EQ("Steve Rogers", res_obj["hits"][0]["document"].at("name"));
+    ASSERT_EQ("Steve Reiley", res_obj["hits"][1]["document"].at("name"));
+
+    documents = {
+            R"({
+                "names": []
+            })"_json,
+            R"({
+                "names": ["Steve Jobs"]
+            })"_json,
+            R"({
+                "names": ["Adam Stator"]
+            })"_json
+    };
+
+    for (auto const &json: documents) {
+        auto add_op = collection_create_op.get()->add(json.dump());
+        ASSERT_TRUE(add_op.ok());
+    }
+
+    req_params = {
+            {"collection", "Names"},
+            {"q", "s"},
+            {"query_by", "names"},
+            {"filter_by", "names:= St*"}
+    };
+
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(1, res_obj["found"].get<size_t>());
+    ASSERT_EQ(1, res_obj["hits"].size());
+    ASSERT_EQ("Steve Jobs", res_obj["hits"][0]["document"]["names"][0]);
+
+    req_params = {
+            {"collection", "Names"},
+            {"q", "s"},
+            {"query_by", "names"},
+            {"filter_by", "names: St*"}
+    };
+
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(2, res_obj["found"].get<size_t>());
+    ASSERT_EQ(2, res_obj["hits"].size());
+    ASSERT_EQ("Adam Stator", res_obj["hits"][0]["document"]["names"][0]);
+    ASSERT_EQ("Steve Jobs", res_obj["hits"][1]["document"]["names"][0]);
+
+    documents = {
+            R"({
+                "names": ["Steve Reiley"]
+            })"_json,
+            R"({
+                "names": ["Storm"]
+            })"_json,
+            R"({
+                "names": ["Adam", "Steve Rogers"]
+            })"_json,
+    };
+
+    for (auto const &json: documents) {
+        auto add_op = collection_create_op.get()->add(json.dump());
+        ASSERT_TRUE(add_op.ok());
+    }
+
+    req_params = {
+            {"collection", "Names"},
+            {"q", "s"},
+            {"query_by", "names"},
+            {"filter_by", "names:= St*"}
+    };
+
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(4, res_obj["found"].get<size_t>());
+    ASSERT_EQ(4, res_obj["hits"].size());
+    ASSERT_EQ("Steve Rogers", res_obj["hits"][0]["document"]["names"][1]);
+    ASSERT_EQ("Storm", res_obj["hits"][1]["document"]["names"][0]);
+    ASSERT_EQ("Steve Reiley", res_obj["hits"][2]["document"]["names"][0]);
+    ASSERT_EQ("Steve Jobs", res_obj["hits"][3]["document"]["names"][0]);
+
+    req_params = {
+            {"collection", "Names"},
+            {"q", "s"},
+            {"query_by", "names"},
+            {"filter_by", "names: St*"}
+    };
+
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(5, res_obj["found"].get<size_t>());
+    ASSERT_EQ(5, res_obj["hits"].size());
+    ASSERT_EQ("Steve Rogers", res_obj["hits"][0]["document"]["names"][1]);
+    ASSERT_EQ("Storm", res_obj["hits"][1]["document"]["names"][0]);
+    ASSERT_EQ("Steve Reiley", res_obj["hits"][2]["document"]["names"][0]);
+    ASSERT_EQ("Adam Stator", res_obj["hits"][3]["document"]["names"][0]);
+    ASSERT_EQ("Steve Jobs", res_obj["hits"][4]["document"]["names"][0]);
+
+    req_params = {
+            {"collection", "Names"},
+            {"q", "s"},
+            {"query_by", "names"},
+            {"filter_by", "names:= Steve*"}
+    };
+
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(3, res_obj["found"].get<size_t>());
+    ASSERT_EQ(3, res_obj["hits"].size());
+    ASSERT_EQ("Steve Rogers", res_obj["hits"][0]["document"]["names"][1]);
+    ASSERT_EQ("Steve Reiley", res_obj["hits"][1]["document"]["names"][0]);
+    ASSERT_EQ("Steve Jobs", res_obj["hits"][2]["document"]["names"][0]);
+
+    req_params = {
+            {"collection", "Names"},
+            {"q", "s"},
+            {"query_by", "names"},
+            {"filter_by", "names: Steve*"}
+    };
+
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(3, res_obj["found"].get<size_t>());
+    ASSERT_EQ(3, res_obj["hits"].size());
+    ASSERT_EQ("Steve Rogers", res_obj["hits"][0]["document"]["names"][1]);
+    ASSERT_EQ("Steve Reiley", res_obj["hits"][1]["document"]["names"][0]);
+    ASSERT_EQ("Steve Jobs", res_obj["hits"][2]["document"]["names"][0]);
+
+    req_params = {
+            {"collection", "Names"},
+            {"q", "s"},
+            {"query_by", "names"},
+            {"filter_by", "names:= Steve R*"}
+    };
+
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(2, res_obj["found"].get<size_t>());
+    ASSERT_EQ(2, res_obj["hits"].size());
+    ASSERT_EQ("Steve Rogers", res_obj["hits"][0]["document"]["names"][1]);
+    ASSERT_EQ("Steve Reiley", res_obj["hits"][1]["document"]["names"][0]);
+
+    req_params = {
+            {"collection", "Names"},
+            {"q", "s"},
+            {"query_by", "names"},
+            {"filter_by", "names: Steve R*"}
+    };
+
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(2, res_obj["found"].get<size_t>());
+    ASSERT_EQ(2, res_obj["hits"].size());
+    ASSERT_EQ("Steve Rogers", res_obj["hits"][0]["document"]["names"][1]);
+    ASSERT_EQ("Steve Reiley", res_obj["hits"][1]["document"]["names"][0]);
+
+    documents = {
+            R"({
+                "names": ["Steve Runner foo"]
+            })"_json,
+            R"({
+                "names": ["foo Steve Runner"]
+            })"_json,
+    };
+
+    for (auto const &json: documents) {
+        auto add_op = collection_create_op.get()->add(json.dump());
+        ASSERT_TRUE(add_op.ok());
+    }
+
+    req_params = {
+            {"collection", "Names"},
+            {"q", "s"},
+            {"query_by", "names"},
+            {"filter_by", "names:= Steve R*"}
+    };
+
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(3, res_obj["found"].get<size_t>());
+    ASSERT_EQ(3, res_obj["hits"].size());
+    ASSERT_EQ("Steve Runner foo", res_obj["hits"][0]["document"]["names"][0]);
+    ASSERT_EQ("Steve Rogers", res_obj["hits"][1]["document"]["names"][1]);
+    ASSERT_EQ("Steve Reiley", res_obj["hits"][2]["document"]["names"][0]);
+
+    req_params = {
+            {"collection", "Names"},
+            {"q", "s"},
+            {"query_by", "names"},
+            {"filter_by", "names: Steve R*"}
+    };
+
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(4, res_obj["found"].get<size_t>());
+    ASSERT_EQ(4, res_obj["hits"].size());
+    ASSERT_EQ("foo Steve Runner", res_obj["hits"][0]["document"]["names"][0]);
+    ASSERT_EQ("Steve Runner foo", res_obj["hits"][1]["document"]["names"][0]);
+    ASSERT_EQ("Steve Rogers", res_obj["hits"][2]["document"]["names"][1]);
+    ASSERT_EQ("Steve Reiley", res_obj["hits"][3]["document"]["names"][0]);
+}
+
+TEST_F(CollectionFilteringTest, ExactFilterOnLongField) {
+    nlohmann::json schema = R"({
+         "name": "companies",
+         "fields": [
+           {"name": "keywords", "type": "string[]"}
+         ]
+       })"_json;
+
+    auto op = collectionManager.create_collection(schema);
+    ASSERT_TRUE(op.ok());
+
+    auto coll = op.get();
+
+    nlohmann::json doc1;
+    doc1["id"] = "0";
+
+    std::string arr_value;
+
+    // when value exceeds 128 tokens, we will fail gracefully
+    for(size_t i = 0; i < 130; i++) {
+        arr_value += "foo" + std::to_string(i) + " ";
+    }
+    doc1["keywords"] = {arr_value};
+
+    ASSERT_TRUE(coll->add(doc1.dump()).ok());
+
+    auto results = coll->search("*", {}, "keywords:=" + arr_value, {}, {}, {0}, 10, 1, FREQUENCY, {false}).get();
+    ASSERT_EQ(0, results["hits"].size());
+}
+
+TEST_F(CollectionFilteringTest, FilterOnStemmedField) {
+    nlohmann::json schema = R"({
+         "name": "companies",
+         "fields": [
+           {"name": "keywords", "type": "string[]", "facet": true, "stem": true }
+         ]
+       })"_json;
+
+    auto op = collectionManager.create_collection(schema);
+    ASSERT_TRUE(op.ok());
+
+    auto coll = op.get();
+
+    nlohmann::json doc1 = {
+        {"id", "124"},
+        {"keywords", {"Restaurant"}}
+    };
+
+    nlohmann::json doc2 = {
+        {"id", "125"},
+        {"keywords", {"Baking"}}
+    };
+
+    ASSERT_TRUE(coll->add(doc1.dump()).ok());
+    ASSERT_TRUE(coll->add(doc2.dump()).ok());
+
+    auto results = coll->search("*", {}, "keywords:=Baking", {}, {}, {0}, 10, 1, FREQUENCY, {false}).get();
+    ASSERT_EQ(1, results["hits"].size());
+    ASSERT_EQ("125", results["hits"][0]["document"]["id"].get<std::string>());
+
+}
+
+TEST_F(CollectionFilteringTest, MaxFilterByCandidates) {
+    Collection *coll1;
+    std::vector<field> fields = {field("title", field_types::STRING, false),
+                                 field("points", field_types::INT32, false)};
+
+    coll1 = collectionManager.get_collection("coll1").get();
+    if(coll1 == nullptr) {
+        coll1 = collectionManager.create_collection("coll1", 1, fields, "points").get();
+    }
+
+    for(size_t i = 0; i < 20; i++) {
+        nlohmann::json doc;
+        doc["title"] = "Independent" + std::to_string(i);
+        doc["points"] = i;
+        coll1->add(doc.dump());
+    }
+
+    std::map<std::string, std::string> req_params = {
+            {"collection", "coll1"},
+            {"q", "*"},
+            {"filter_by", "title:independent*"},
+    };
+    nlohmann::json embedded_params;
+    std::string json_res;
+    auto now_ts = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+
+    auto search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+
+    auto res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(4, res_obj["found"].get<size_t>());
+    ASSERT_EQ(4, res_obj["hits"].size());
+    ASSERT_EQ("Independent19", res_obj["hits"][0]["document"]["title"]);
+    ASSERT_EQ("Independent18", res_obj["hits"][1]["document"]["title"]);
+    ASSERT_EQ("Independent17", res_obj["hits"][2]["document"]["title"]);
+    ASSERT_EQ("Independent16", res_obj["hits"][3]["document"]["title"]);
+
+    req_params = {
+            {"collection", "coll1"},
+            {"q", "*"},
+            {"filter_by", "title:independent*"},
+            {"max_filter_by_candidates", "0"}
+    };
+
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(0, res_obj["found"].get<size_t>());
+    ASSERT_EQ(0, res_obj["hits"].size());
+
+    req_params = {
+            {"collection", "coll1"},
+            {"q", "*"},
+            {"filter_by", "title:independent*"},
+            {"max_filter_by_candidates", "1"}
+    };
+
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(1, res_obj["found"].get<size_t>());
+    ASSERT_EQ(1, res_obj["hits"].size());
+    ASSERT_EQ("Independent19", res_obj["hits"][0]["document"]["title"]);
+}
+
+TEST_F(CollectionFilteringTest, FilterOnObjectFields) {
+    auto schema_json =
+            R"({
+                "name": "Products",
+                "fields": [
+                    {"name": "product_id", "type": "string"},
+                    {"name": "product_name", "type": "string", "infix": true},
+                    {"name": "product_description", "type": "string"},
+                    {"name": "embedding", "type":"float[]", "embed":{"from": ["product_description"], "model_config": {"model_name": "ts/e5-small"}}},
+                    {"name": "rating", "type": "int32"},
+                    {"name": "stocks", "type": "object"},
+                    {"name": "stocks.*", "type": "auto", "optional": true}
+                ],
+                "enable_nested_fields": true
+            })"_json;
+    std::vector<nlohmann::json> documents = {
+            R"({
+                "product_id": "product_a",
+                "product_name": "shampoo",
+                "product_description": "Our new moisturizing shampoo is perfect for those with dry or damaged hair.",
+                "rating": "2",
+                "stocks": {
+                    "26": {
+                        "rec": true
+                    }
+                }
+            })"_json,
+            R"({
+                "product_id": "product_b",
+                "product_name": "soap",
+                "product_description": "Introducing our all-natural, organic soap bar made with essential oils and botanical ingredients.",
+                "rating": "4",
+                "stocks": {
+                    "26": {
+                        "rec": false
+                    }
+                }
+            })"_json,
+            R"({
+                "product_id": "product_c",
+                "product_name": "comb",
+                "product_description": "Experience the natural elegance and gentle care of our handcrafted wooden combs – because your hair deserves the best.",
+                "rating": "3",
+                "stocks": {}
+            })"_json
+    };
+
+    EmbedderManager::set_model_dir("/tmp/typesense_test/models");
+
+    auto collection_create_op = collectionManager.create_collection(schema_json);
+    ASSERT_TRUE(collection_create_op.ok());
+    for (auto const &json: documents) {
+        auto add_op = collection_create_op.get()->add(json.dump());
+        if (!add_op.ok()) {
+            LOG(INFO) << add_op.error();
+        }
+        ASSERT_TRUE(add_op.ok());
+    }
+
+    std::map<std::string, std::string> req_params = {
+            {"collection", "Products"},
+            {"q", "*"},
+            {"filter_by", "stocks.26.rec:true"},
+            {"include_fields", "product_id, product_name, stocks"}
+    };
+    nlohmann::json embedded_params;
+    std::string json_res;
+    auto now_ts = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+
+    auto search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+
+    auto res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(1, res_obj["found"].get<size_t>());
+    ASSERT_EQ(1, res_obj["hits"].size());
+    ASSERT_EQ("product_a", res_obj["hits"][0]["document"]["product_id"]);
+    ASSERT_EQ(1, res_obj["hits"][0]["document"].count("stocks"));
+    ASSERT_EQ(1, res_obj["hits"][0]["document"]["stocks"].size());
+    ASSERT_EQ(1, res_obj["hits"][0]["document"]["stocks"].count("26"));
+    ASSERT_EQ(1, res_obj["hits"][0]["document"]["stocks"]["26"].size());
+    ASSERT_EQ(1, res_obj["hits"][0]["document"]["stocks"]["26"].count("rec"));
+    ASSERT_TRUE(res_obj["hits"][0]["document"]["stocks"]["26"]["rec"]);
+
+    req_params = {
+            {"collection", "Products"},
+            {"q", "*"},
+            {"filter_by", "stocks.26.rec:false"},
+            {"include_fields", "product_id, product_name, stocks"}
+    };
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(1, res_obj["found"].get<size_t>());
+    ASSERT_EQ(1, res_obj["hits"].size());
+    ASSERT_EQ("product_b", res_obj["hits"][0]["document"]["product_id"]);
+    ASSERT_EQ(1, res_obj["hits"][0]["document"].count("stocks"));
+    ASSERT_EQ(1, res_obj["hits"][0]["document"]["stocks"].size());
+    ASSERT_EQ(1, res_obj["hits"][0]["document"]["stocks"].count("26"));
+    ASSERT_EQ(1, res_obj["hits"][0]["document"]["stocks"]["26"].size());
+    ASSERT_EQ(1, res_obj["hits"][0]["document"]["stocks"]["26"].count("rec"));
+    ASSERT_FALSE(res_obj["hits"][0]["document"]["stocks"]["26"]["rec"]);
+}
+
+TEST_F(CollectionFilteringTest, IgnoreFieldValidation) {
+    Collection *coll_mul_fields;
+
+    std::ifstream infile(std::string(ROOT_DIR)+"test/multi_field_documents.jsonl");
+    std::vector<field> fields = {
+            field("title", field_types::STRING, false),
+            field("starring", field_types::STRING, false),
+            field("cast", field_types::STRING_ARRAY, true),
+            field("points", field_types::INT32, false)
+    };
+
+    coll_mul_fields = collectionManager.get_collection("coll_mul_fields").get();
+    if(coll_mul_fields == nullptr) {
+        coll_mul_fields = collectionManager.create_collection("coll_mul_fields", 4, fields, "points").get();
+    }
+
+    std::string json_line;
+
+    while (std::getline(infile, json_line)) {
+        coll_mul_fields->add(json_line);
+    }
+
+    infile.close();
+    nlohmann::json embedded_params;
+    std::string json_res;
+    long now_ts = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+
+    std::map<std::string, std::string> req_params = {
+            {"collection", "coll_mul_fields"},
+            {"q", "*"},
+            {"filter_by", "age: 100"}
+    };
+    auto search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_FALSE(search_op.ok());
+    ASSERT_EQ("Could not find a filter field named `age` in the schema.", search_op.error());
+
+    req_params = {
+            {"collection", "coll_mul_fields"},
+            {"q", "*"},
+            {"filter_by", "age: 100"},
+            {"validate_field_names", "false"}
+    };
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+
+    auto res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(0, res_obj["found"]);
+
+    req_params = {
+            {"collection", "coll_mul_fields"},
+            {"q", "the"},
+            {"query_by", "title"},
+            {"filter_by", "age: 100"},
+            {"enable_lazy_filter", "true"},
+            {"validate_field_names", "false"}
+    };
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(0, res_obj["found"]);
+
+    req_params = {
+            {"collection", "coll_mul_fields"},
+            {"q", "*"},
+            {"filter_by", "age: 100 && points: 75"},
+            {"validate_field_names", "false"}
+    };
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(0, res_obj["found"]);
+
+    req_params = {
+            {"collection", "coll_mul_fields"},
+            {"q", "*"},
+            {"filter_by", "age: 100 || points: 75"},
+            {"validate_field_names", "false"}
+    };
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(1, res_obj["found"]);
+    ASSERT_EQ(1, res_obj["hits"].size());
+    ASSERT_EQ("8", res_obj["hits"][0]["document"].at("id"));
 }

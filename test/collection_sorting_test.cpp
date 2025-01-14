@@ -945,9 +945,12 @@ TEST_F(CollectionSortingTest, GeoPointSortingWithPrecision) {
     std::vector<std::string> expected_ids = {
         "6", "2", "1", "0", "3", "4", "7", "5"
     };
+    std::vector<float> geo_distance_meters = {726,461,460,467,1786,2007,3556,3299};
 
     for (size_t i = 0; i < expected_ids.size(); i++) {
-        ASSERT_STREQ(expected_ids[i].c_str(), results["hits"][i]["document"]["id"].get<std::string>().c_str());
+        auto const& hit = results["hits"][i];
+        ASSERT_EQ(expected_ids[i], hit["document"]["id"]);
+        ASSERT_FLOAT_EQ(geo_distance_meters[i], hit["geo_distance_meters"]["loc"]);
     }
 
     // badly formatted precision
@@ -1736,7 +1739,7 @@ TEST_F(CollectionSortingTest, TextMatchBucketRanking) {
                            spp::sparse_hash_set<std::string>(), 10, "", 30, 4, "title", 20, {}, {}, {}, 0,
                            "<mark>", "</mark>", {3}, 1000, true);
     ASSERT_FALSE(res_op.ok());
-    ASSERT_EQ("Invalid value passed for _text_match `buckets` configuration.", res_op.error());
+    ASSERT_EQ("Invalid value passed for _text_match `buckets` or `bucket_size` configuration.", res_op.error());
 
     // handle negative value
     sort_fields[0] = sort_by("_text_match(buckets: -1)", "DESC");
@@ -1747,7 +1750,7 @@ TEST_F(CollectionSortingTest, TextMatchBucketRanking) {
                            spp::sparse_hash_set<std::string>(), 10, "", 30, 4, "title", 20, {}, {}, {}, 0,
                            "<mark>", "</mark>", {3}, 1000, true);
     ASSERT_FALSE(res_op.ok());
-    ASSERT_EQ("Invalid value passed for _text_match `buckets` configuration.", res_op.error());
+    ASSERT_EQ("Invalid value passed for _text_match `buckets` or `bucket_size` configuration.", res_op.error());
 
     collectionManager.drop_collection("coll1");
 }
@@ -1982,6 +1985,52 @@ TEST_F(CollectionSortingTest, WildcardSearchSequenceIdSort) {
     ASSERT_EQ(30, res["found"].get<size_t>());
 }
 
+TEST_F(CollectionSortingTest, DefaultSortingFieldStringNotIndexed) {
+    nlohmann::json schema = R"({
+        "name": "coll1",
+        "fields": [
+            {"name": "category", "type": "string", "sort": true, "index": false}
+        ],
+        "default_sorting_field": "category"
+    })"_json;
+
+    Collection* coll1 = collectionManager.create_collection(schema).get();
+
+    nlohmann::json doc;
+    doc["category"] = "Shoes";
+    ASSERT_TRUE(coll1->add(doc.dump()).ok());
+
+    std::vector<sort_by> sort_fields = {};
+
+    auto res_op = coll1->search("*", {}, "", {}, sort_fields, {2}, 10, 1, FREQUENCY, {true}, 0);
+    ASSERT_FALSE(res_op.ok());
+    ASSERT_EQ("Default sorting field not found in the schema or it has been marked as a "
+              "non-indexed field.", res_op.error());
+}
+
+TEST_F(CollectionSortingTest, SortingFieldNotIndexed) {
+    nlohmann::json schema = R"({
+        "name": "coll1",
+        "fields": [
+            {"name": "category", "type": "int32", "sort": true, "index": false}
+        ]
+    })"_json;
+
+    Collection* coll1 = collectionManager.create_collection(schema).get();
+
+    nlohmann::json doc;
+    doc["category"] = 100;
+    ASSERT_TRUE(coll1->add(doc.dump()).ok());
+
+    std::vector<sort_by> sort_fields = {
+        sort_by("category", "DESC"),
+    };
+
+    auto res_op = coll1->search("*", {}, "", {}, sort_fields, {2}, 10, 1, FREQUENCY, {true}, 0);
+    ASSERT_FALSE(res_op.ok());
+    ASSERT_EQ("Could not find a field named `category` in the schema for sorting.", res_op.error());
+}
+
 TEST_F(CollectionSortingTest, OptionalFilteringViaSortingWildcard) {
     std::string coll_schema = R"(
         {
@@ -2121,21 +2170,33 @@ TEST_F(CollectionSortingTest, OptionalFilteringViaSortingWildcard) {
     ASSERT_FALSE(search_op.ok());
     ASSERT_EQ("The eval expression in sort_by is empty.", search_op.error());
 
+    // when no eval query has invalid field name.
     req_params = {
             {"collection", "coll1"},
-            {"q", "a"},
+            {"q", "*"},
             {"query_by", "brand"},
-            {"sort_by", "_eval(brand:puma):desc, _text_match:desc"},
-            {"infix", "always"}
+            {"sort_by", "_eval(foo:puma):desc, _text_match:desc"}
+    };
+
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_FALSE(search_op.ok());
+    ASSERT_EQ("Error parsing eval expression in sort_by clause.", search_op.error());
+
+    // when no eval query has invalid field name but validate_field_names is false.
+    req_params = {
+            {"collection", "coll1"},
+            {"q", "*"},
+            {"query_by", "brand"},
+            {"sort_by", "_eval(foo:puma):desc, _text_match:desc"},
+            {"validate_field_names", "false"}
     };
 
     search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
     ASSERT_TRUE(search_op.ok());
     results = nlohmann::json::parse(json_res);
 
-    ASSERT_EQ(4, results["hits"].size()); // 3 Adidas 1 Puma documents
-    // Because of `_eval`, Puma document will be on top even when having a lower text match score than Adidas documents.
-    expected_ids = {"5", "4", "2", "1"};
+    ASSERT_EQ(6, results["hits"].size());
+    expected_ids = {"5", "4", "3", "2", "1", "0"};
     for(size_t i = 0; i < expected_ids.size(); i++) {
         ASSERT_EQ(expected_ids[i], results["hits"][i]["document"]["id"].get<std::string>());
     }
@@ -2161,6 +2222,116 @@ TEST_F(CollectionSortingTest, OptionalFilteringViaSortingWildcard) {
     ASSERT_EQ("Only one sorting eval expression is allowed.", res_op.error());
 
     collectionManager.drop_collection("coll1");
+
+    schema =
+            R"({
+                "name": "Products",
+                "fields": [
+                    {"name": "product_id", "type": "string"},
+                    {"name": "product_name", "type": "string", "infix": true},
+                    {"name": "product_description", "type": "string"},
+                    {"name": "embedding", "type":"float[]", "embed":{"from": ["product_description"], "model_config": {"model_name": "ts/e5-small"}}},
+                    {"name": "rating", "type": "int32"},
+                    {"name": "stocks", "type": "object"},
+                    {"name": "stocks.*", "type": "auto", "optional": true}
+                ],
+                "enable_nested_fields": true
+            })"_json;
+    std::vector<nlohmann::json> documents = {
+            R"({
+                "product_id": "product_a",
+                "product_name": "shampoo",
+                "product_description": "Our new moisturizing shampoo is perfect for those with dry or damaged hair.",
+                "rating": "2",
+                "stocks": {
+                    "26": {
+                        "rec": true
+                    }
+                }
+            })"_json,
+            R"({
+                "product_id": "product_b",
+                "product_name": "soap",
+                "product_description": "Introducing our all-natural, organic soap bar made with essential oils and botanical ingredients.",
+                "rating": "4",
+                "stocks": {
+                    "26": {
+                        "rec": false
+                    }
+                }
+            })"_json,
+            R"({
+                "product_id": "product_c",
+                "product_name": "comb",
+                "product_description": "Experience the natural elegance and gentle care of our handcrafted wooden combs – because your hair deserves the best.",
+                "rating": "3",
+                "stocks": {}
+            })"_json,
+            R"({
+                "product_id": "product_d",
+                "product_name": "hair oil",
+                "product_description": "Revitalize your hair with our nourishing hair oil – nature's secret to lustrous, healthy locks.",
+                "rating": "1",
+                "stocks": {
+                    "26": {
+                        "rec": false
+                    }
+                }
+            })"_json
+    };
+
+    EmbedderManager::set_model_dir("/tmp/typesense_test/models");
+
+    auto collection_create_op = collectionManager.create_collection(schema);
+    ASSERT_TRUE(collection_create_op.ok());
+    for (auto const &json: documents) {
+        auto add_op = collection_create_op.get()->add(json.dump());
+        if (!add_op.ok()) {
+            LOG(INFO) << add_op.error();
+        }
+        ASSERT_TRUE(add_op.ok());
+    }
+
+    req_params = {
+            {"collection", "Products"},
+            {"q", "*"},
+            {"sort_by", "_eval([(stocks.26.rec:true):3, (stocks.26.rec:false):2]):desc"},
+            {"include_fields", "product_id, product_name, stocks"}
+    };
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+
+    auto res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(4, res_obj["found"].get<size_t>());
+    ASSERT_EQ(4, res_obj["hits"].size());
+
+    ASSERT_EQ("product_a", res_obj["hits"][0]["document"]["product_id"]);
+    ASSERT_EQ(1, res_obj["hits"][0]["document"].count("stocks"));
+    ASSERT_EQ(1, res_obj["hits"][0]["document"]["stocks"].size());
+    ASSERT_EQ(1, res_obj["hits"][0]["document"]["stocks"].count("26"));
+    ASSERT_EQ(1, res_obj["hits"][0]["document"]["stocks"]["26"].size());
+    ASSERT_EQ(1, res_obj["hits"][0]["document"]["stocks"]["26"].count("rec"));
+    ASSERT_TRUE(res_obj["hits"][0]["document"]["stocks"]["26"]["rec"]);
+
+    ASSERT_EQ("product_d", res_obj["hits"][1]["document"]["product_id"]);
+    ASSERT_EQ(1, res_obj["hits"][1]["document"].count("stocks"));
+    ASSERT_EQ(1, res_obj["hits"][1]["document"]["stocks"].size());
+    ASSERT_EQ(1, res_obj["hits"][1]["document"]["stocks"].count("26"));
+    ASSERT_EQ(1, res_obj["hits"][1]["document"]["stocks"]["26"].size());
+    ASSERT_EQ(1, res_obj["hits"][1]["document"]["stocks"]["26"].count("rec"));
+    ASSERT_FALSE(res_obj["hits"][1]["document"]["stocks"]["26"]["rec"]);
+
+    ASSERT_EQ("product_b", res_obj["hits"][2]["document"]["product_id"]);
+    ASSERT_EQ(1, res_obj["hits"][2]["document"].count("stocks"));
+    ASSERT_EQ(1, res_obj["hits"][2]["document"]["stocks"].size());
+    ASSERT_EQ(1, res_obj["hits"][2]["document"]["stocks"].count("26"));
+    ASSERT_EQ(1, res_obj["hits"][2]["document"]["stocks"]["26"].size());
+    ASSERT_EQ(1, res_obj["hits"][2]["document"]["stocks"]["26"].count("rec"));
+    ASSERT_FALSE(res_obj["hits"][2]["document"]["stocks"]["26"]["rec"]);
+
+    ASSERT_EQ("product_c", res_obj["hits"][3]["document"]["product_id"]);
+    ASSERT_EQ(1, res_obj["hits"][3]["document"].count("stocks"));
+    ASSERT_EQ(0, res_obj["hits"][3]["document"]["stocks"].size());
 }
 
 TEST_F(CollectionSortingTest, OptionalFilteringViaSortingSearch) {
@@ -2169,7 +2340,7 @@ TEST_F(CollectionSortingTest, OptionalFilteringViaSortingSearch) {
             "name": "coll1",
             "fields": [
               {"name": "title", "type": "string" },
-              {"name": "brand", "type": "string" },
+              {"name": "brand", "type": "string", "infix": true },
               {"name": "points", "type": "int32" }
             ]
         }
@@ -2240,6 +2411,34 @@ TEST_F(CollectionSortingTest, OptionalFilteringViaSortingSearch) {
 
     ASSERT_EQ(5, results["hits"].size());
     expected_ids = {"4", "3", "2", "1", "0"};
+    for(size_t i = 0; i < expected_ids.size(); i++) {
+        ASSERT_EQ(expected_ids[i], results["hits"][i]["document"]["id"].get<std::string>());
+    }
+
+    nlohmann::json doc = R"(
+        {
+            "title": "title5",
+            "brand": "puma",
+            "points": 5
+        }
+    )"_json;
+    ASSERT_TRUE(coll1->add(doc.dump()).ok());
+
+    req_params = {
+            {"collection", "coll1"},
+            {"q", "a"},
+            {"query_by", "brand"},
+            {"sort_by", "_eval(brand:puma):desc, _text_match:desc"},
+            {"infix", "always"}
+    };
+
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+    results = nlohmann::json::parse(json_res);
+
+    ASSERT_EQ(4, results["hits"].size()); // 3 Adidas 1 Puma documents
+    // Because of `_eval`, Puma document will be on top even when having a lower text match score than Adidas documents.
+    expected_ids = {"5", "4", "2", "1"};
     for(size_t i = 0; i < expected_ids.size(); i++) {
         ASSERT_EQ(expected_ids[i], results["hits"][i]["document"]["id"].get<std::string>());
     }
@@ -2637,4 +2836,500 @@ TEST_F(CollectionSortingTest, TestVectorQueryQsSorting) {
     ASSERT_EQ(2, results["hits"].size());
     ASSERT_EQ("0", results["hits"][0]["document"]["id"]);
     ASSERT_EQ("1", results["hits"][1]["document"]["id"]);
+}
+
+TEST_F(CollectionSortingTest, TestVectorQueryDistanceThresholdSorting) {
+    auto schema_json = R"({
+            "name": "products",
+            "fields":[
+            {
+                "name": "product_name",
+                        "type": "string"
+            },
+            {
+                "name": "embedding",
+                        "type": "float[]",
+                        "embed": {
+                    "from": [
+                    "product_name"
+                    ],
+                    "model_config": {
+                        "model_name": "ts/e5-small"
+                    }
+                }
+            }
+            ]
+    })"_json;
+
+    EmbedderManager::set_model_dir("/tmp/typesense_test/models");
+
+    auto coll_op = collectionManager.create_collection(schema_json);
+    ASSERT_TRUE(coll_op.ok());
+    auto coll = coll_op.get();
+
+    std::vector<std::string> products = {"Mobile Phone", "Cell Phone", "Telephone"};
+    nlohmann::json doc;
+    for (auto product: products) {
+        doc["product_name"] = product;
+        ASSERT_TRUE(coll->add(doc.dump()).ok());
+    }
+
+    // when eval condition is empty
+    std::map<std::string, std::string> req_params = {
+            {"collection", "products"},
+            {"q", "phone"},
+            {"query_by", "product_name"},
+            {"sort_by", "_text_match:desc,_vector_query(embedding:([],distance_threshold:0.3)):asc"},
+            {"exclude_fields", "embedding"}
+    };
+    nlohmann::json embedded_params;
+    std::string json_res;
+    auto now_ts = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+    auto search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+
+    auto res = nlohmann::json::parse(json_res);
+
+    ASSERT_EQ(2, res["hits"].size());
+    ASSERT_EQ("Mobile Phone", res["hits"][0]["document"]["product_name"]);
+    ASSERT_EQ(0.07853113859891891, res["hits"][0]["vector_distance"].get<float>());
+    ASSERT_EQ("Cell Phone", res["hits"][1]["document"]["product_name"]);
+    ASSERT_EQ(0.08472149819135666, res["hits"][1]["vector_distance"].get<float>());
+}
+
+TEST_F(CollectionSortingTest, TestSortByRandomOrder) {
+    auto schema_json = R"({
+            "name": "digital_products",
+            "fields":[
+            {
+                "name": "product_name","type": "string"
+            }]
+    })"_json;
+
+
+    auto coll_op = collectionManager.create_collection(schema_json);
+    ASSERT_TRUE(coll_op.ok());
+    auto coll = coll_op.get();
+
+    std::vector<std::string> products = {"Samsung Smartphone", "Vivo SmartPhone", "Oneplus Smartphone", "Pixel Smartphone", "Moto Smartphone"};
+    nlohmann::json doc;
+    for (auto product: products) {
+        doc["product_name"] = product;
+        ASSERT_TRUE(coll->add(doc.dump()).ok());
+    }
+
+    sort_fields = {
+            sort_by("_rand(5)", "asc"),
+    };
+
+    auto results = coll->search("smartphone", {"product_name"}, "", {}, sort_fields, {0}).get();
+    ASSERT_EQ(5, results["hits"].size());
+    ASSERT_EQ("1", results["hits"][0]["document"]["id"]);
+    ASSERT_EQ("4", results["hits"][1]["document"]["id"]);
+    ASSERT_EQ("0", results["hits"][2]["document"]["id"]);
+    ASSERT_EQ("3", results["hits"][3]["document"]["id"]);
+    ASSERT_EQ("2", results["hits"][4]["document"]["id"]);
+
+
+
+    sort_fields = {
+            sort_by("_rand(8)", "asc"),
+    };
+
+    results = coll->search("smartphone", {"product_name"}, "", {}, sort_fields, {0}).get();
+
+    ASSERT_EQ(5, results["hits"].size());
+    ASSERT_EQ("1", results["hits"][0]["document"]["id"]);
+    ASSERT_EQ("3", results["hits"][1]["document"]["id"]);
+    ASSERT_EQ("4", results["hits"][2]["document"]["id"]);
+    ASSERT_EQ("0", results["hits"][3]["document"]["id"]);
+    ASSERT_EQ("2", results["hits"][4]["document"]["id"]);
+
+
+    //without seed value it takes current time as seed
+    sort_fields = {
+            sort_by("_rand()", "asc"),
+    };
+
+    results = coll->search("smartphone", {"product_name"}, "", {}, sort_fields, {0}).get();
+    ASSERT_EQ(5, results["hits"].size());
+
+    sort_fields = {
+            sort_by("_rand", "asc"),
+    };
+
+    results = coll->search("*", {}, "", {}, sort_fields, {0}).get();
+    ASSERT_EQ(5, results["hits"].size());
+
+    //should work with other sort params as tie breaker for first param
+    sort_fields = {
+            sort_by("_text_match", "desc"),
+            sort_by("_rand(5)", "asc")
+    };
+    results = coll->search("smartphone", {"product_name"}, "", {}, sort_fields, {0}).get();
+    ASSERT_EQ(5, results["hits"].size());
+    ASSERT_EQ("1", results["hits"][0]["document"]["id"]);
+    ASSERT_EQ("4", results["hits"][1]["document"]["id"]);
+    ASSERT_EQ("0", results["hits"][2]["document"]["id"]);
+    ASSERT_EQ("3", results["hits"][3]["document"]["id"]);
+    ASSERT_EQ("2", results["hits"][4]["document"]["id"]);
+
+    sort_fields = {
+            sort_by("_text_match", "desc"),
+            sort_by("_rand(8)", "asc")
+    };
+    results = coll->search("smartphone", {"product_name"}, "", {}, sort_fields, {0}).get();
+    ASSERT_EQ(5, results["hits"].size());
+    ASSERT_EQ("1", results["hits"][0]["document"]["id"]);
+    ASSERT_EQ("3", results["hits"][1]["document"]["id"]);
+    ASSERT_EQ("4", results["hits"][2]["document"]["id"]);
+    ASSERT_EQ("0", results["hits"][3]["document"]["id"]);
+    ASSERT_EQ("2", results["hits"][4]["document"]["id"]);
+
+    //negative seed value is not allowed
+    sort_fields = {
+            sort_by("_rand(-1)", "asc"),
+    };
+
+    auto results_op = coll->search("*", {}, "", {}, sort_fields, {0});
+    ASSERT_EQ("Only positive integer seed value is allowed.", results_op.error());
+
+    sort_fields = {
+            sort_by("_rand(sadkjkj)", "asc"),
+    };
+
+    results_op = coll->search("*", {}, "", {}, sort_fields, {0});
+    ASSERT_EQ("Only positive integer seed value is allowed.", results_op.error());
+
+    //typos
+    sort_fields = {
+            sort_by("rand()", "asc"),
+    };
+
+    results_op = coll->search("*", {}, "", {}, sort_fields, {0});
+    ASSERT_EQ("Could not find a field named `rand` in the schema for sorting.", results_op.error());
+
+    sort_fields = {
+            sort_by("_random()", "asc"),
+    };
+
+    results_op = coll->search("*", {}, "", {}, sort_fields, {0});
+    ASSERT_EQ("Could not find a field named `_random` in the schema for sorting.", results_op.error());
+}
+
+TEST_F(CollectionSortingTest, DiffFunctionSort) {
+    auto schema_json = R"({
+            "name": "products",
+            "fields":[
+            {
+                "name": "name","type": "string",
+                "name": "timestamp","type": "int64"
+            }]
+    })"_json;
+
+    auto coll_op = collectionManager.create_collection(schema_json);
+    ASSERT_TRUE(coll_op.ok());
+    auto coll = coll_op.get();
+
+    std::vector<std::string> products = {"Samsung Smartphone", "Vivo SmartPhone", "Oneplus Smartphone", "Pixel Smartphone", "Moto Smartphone"};
+    nlohmann::json doc;
+    for (auto i = 0; i < products.size(); ++i) {
+        doc["name"] = products[i];
+        doc["timestamp"] = 1728383250 + i * 1000;
+        ASSERT_TRUE(coll->add(doc.dump()).ok());
+    }
+
+    //put 1728383250 + 3000 as base value
+    sort_fields = {
+            sort_by("timestamp(origin: 1728386250, func: diff)", "asc"),
+    };
+
+    auto results = coll->search("*", {}, "", {}, sort_fields, {0}).get();
+    ASSERT_EQ(5, results["hits"].size());
+    ASSERT_EQ("3", results["hits"][0]["document"]["id"]);
+    ASSERT_EQ(1728386250, results["hits"][0]["document"]["timestamp"].get<size_t>());
+    ASSERT_EQ("4", results["hits"][1]["document"]["id"]);
+    ASSERT_EQ(1728387250, results["hits"][1]["document"]["timestamp"].get<size_t>());
+    ASSERT_EQ("2", results["hits"][2]["document"]["id"]);
+    ASSERT_EQ(1728385250, results["hits"][2]["document"]["timestamp"].get<size_t>());
+    ASSERT_EQ("1", results["hits"][3]["document"]["id"]);
+    ASSERT_EQ(1728384250, results["hits"][3]["document"]["timestamp"].get<size_t>());
+    ASSERT_EQ("0", results["hits"][4]["document"]["id"]);
+    ASSERT_EQ(1728383250, results["hits"][4]["document"]["timestamp"].get<size_t>());
+
+
+    //desc sort
+    sort_fields = {
+            sort_by("timestamp(func:diff, origin: 1728386250)", "desc"),
+    };
+
+    results = coll->search("*", {}, "", {}, sort_fields, {0}).get();
+    ASSERT_EQ(5, results["hits"].size());
+    ASSERT_EQ("0", results["hits"][0]["document"]["id"]);
+    ASSERT_EQ(1728383250, results["hits"][0]["document"]["timestamp"].get<size_t>());
+    ASSERT_EQ("1", results["hits"][1]["document"]["id"]);
+    ASSERT_EQ(1728384250, results["hits"][1]["document"]["timestamp"].get<size_t>());
+    ASSERT_EQ("4", results["hits"][2]["document"]["id"]);
+    ASSERT_EQ(1728387250, results["hits"][2]["document"]["timestamp"].get<size_t>());
+    ASSERT_EQ("2", results["hits"][3]["document"]["id"]);
+    ASSERT_EQ(1728385250, results["hits"][3]["document"]["timestamp"].get<size_t>());
+    ASSERT_EQ("3", results["hits"][4]["document"]["id"]);
+    ASSERT_EQ(1728386250, results["hits"][4]["document"]["timestamp"].get<size_t>());
+}
+
+TEST_F(CollectionSortingTest, DecayFunctionsValidation) {
+    auto schema_json = R"({
+            "name": "products",
+            "fields":[
+            {
+                "name": "name","type": "string",
+                "name": "timestamp","type": "int64"
+            }]
+    })"_json;
+
+    auto coll_op = collectionManager.create_collection(schema_json);
+    ASSERT_TRUE(coll_op.ok());
+    auto coll = coll_op.get();
+
+    std::vector<std::string> products = {"Samsung Smartphone", "Vivo SmartPhone", "Oneplus Smartphone", "Pixel Smartphone", "Moto Smartphone"};
+    nlohmann::json doc;
+    for (auto i = 0; i < products.size(); ++i) {
+        doc["name"] = products[i];
+        doc["timestamp"] = 1728383250 + i * 1000;
+        ASSERT_TRUE(coll->add(doc.dump()).ok());
+    }
+
+    //non integer scale value
+    sort_fields = {
+            sort_by("timestamp(origin: 1728386250, scale: 100.4, func: linear)", "asc"),
+    };
+
+    auto results = coll->search("*", {}, "", {}, sort_fields, {0});
+    ASSERT_EQ("sort_by: scale param should be non-zero integer.", results.error());
+
+    //non integer origin value
+    sort_fields = {
+            sort_by("timestamp(origin: 1728386250.5, scale: 100, func: linear)", "asc"),
+    };
+
+    results = coll->search("*", {}, "", {}, sort_fields, {0});
+    ASSERT_EQ("sort_by: origin param should be integer.", results.error());
+
+    //non integer offset value
+    sort_fields = {
+            sort_by("timestamp(origin: 1728386250, scale: 100, func: linear, offset: -2.5)", "asc"),
+    };
+
+    results = coll->search("*", {}, "", {}, sort_fields, {0});
+    ASSERT_EQ("sort_by: offset param should be integer.", results.error());
+
+    //0 scale value
+    sort_fields = {
+            sort_by("timestamp(origin: 1728386250, scale: 0, func: linear, offset: -2)", "asc"),
+    };
+
+    results = coll->search("*", {}, "", {}, sort_fields, {0});
+    ASSERT_EQ("sort_by: scale param should be non-zero integer.", results.error());
+
+    //missing scale param
+    sort_fields = {
+            sort_by("timestamp(origin: 1728386250, func: linear, offset: -2)", "asc"),
+    };
+
+    results = coll->search("*", {}, "", {}, sort_fields, {0});
+    ASSERT_EQ("Bad syntax. origin and scale are mandatory params for decay function linear", results.error());
+
+    //missing origin param
+    sort_fields = {
+            sort_by("timestamp(scale: 100, func: linear, offset: -2)", "asc"),
+    };
+
+    results = coll->search("*", {}, "", {}, sort_fields, {0});
+    ASSERT_EQ("Bad syntax. origin and scale are mandatory params for decay function linear", results.error());
+
+    //decay value should be between 0.0 to 1.0
+    sort_fields = {
+            sort_by("timestamp(origin: 1728386250, func: linear, scale: -10, decay: 1.4)", "asc"),
+    };
+
+    results = coll->search("*", {}, "", {}, sort_fields, {0});
+    ASSERT_EQ("sort_by: decay param should be float in range [0.0, 1.0].", results.error());
+
+    //only gauss, linear, diff, and exp keys are supported for decay functions
+    sort_fields = {
+            sort_by("timestamp(origin: 1728386250, func: expo, scale: -10, decay: 0.4)", "asc"),
+    };
+
+    results = coll->search("*", {}, "", {}, sort_fields, {0});
+    ASSERT_EQ("Bad syntax. Not a valid decay function key `expo`.", results.error());
+
+    //missing func
+    sort_fields = {
+            sort_by("timestamp(origin: 1728386250)", "asc"),
+    };
+
+    results = coll->search("*", {}, "", {}, sort_fields, {0});
+    ASSERT_EQ("Bad syntax. Missing param `func`.", results.error());
+
+    //correct params
+    sort_fields = {
+            sort_by("timestamp(origin: 1728386250, func: exp, scale: -10, decay: 0.4)", "asc"),
+    };
+
+    results = coll->search("*", {}, "", {}, sort_fields, {0});
+    ASSERT_TRUE(results.ok());
+}
+
+TEST_F(CollectionSortingTest, DecayFunctionsTest) {
+    auto schema_json = R"({
+            "name": "products",
+            "fields":[
+                {"name": "product_name","type": "string"},
+                {"name": "timestamp","type": "int64"}
+            ]
+    })"_json;
+
+    auto coll_op = collectionManager.create_collection(schema_json);
+    ASSERT_TRUE(coll_op.ok());
+    auto coll = coll_op.get();
+
+    std::vector<std::string> products = {"Samsung Smartphone", "Vivo SmartPhone", "Oneplus Smartphone", "Pixel Smartphone", "Moto Smartphone"};
+    nlohmann::json doc;
+    for (auto i = 0; i < products.size(); ++i) {
+        doc["product_name"] = products[i];
+        doc["timestamp"] = 1728383250 + i * 1000;
+        ASSERT_TRUE(coll->add(doc.dump()).ok());
+    }
+
+    sort_fields = {
+            sort_by("timestamp(origin: 1728385250, func: gauss, scale: 1000, decay: 0.5)", "desc"),
+    };
+
+    auto results = coll->search("smartphone", {"product_name"}, "", {}, sort_fields, {0}).get();
+    ASSERT_EQ(5, results["hits"].size());
+    //score reduces by half respecting gaussian curve with scale value from origin
+    ASSERT_EQ("2", results["hits"][0]["document"]["id"]);
+    ASSERT_EQ(1728385250, results["hits"][0]["document"]["timestamp"].get<size_t>());
+    ASSERT_EQ("3", results["hits"][1]["document"]["id"]);
+    ASSERT_EQ(1728386250, results["hits"][1]["document"]["timestamp"].get<size_t>());
+    ASSERT_EQ("1", results["hits"][2]["document"]["id"]);
+    ASSERT_EQ(1728384250, results["hits"][2]["document"]["timestamp"].get<size_t>());
+    ASSERT_EQ("4", results["hits"][3]["document"]["id"]);
+    ASSERT_EQ(1728387250, results["hits"][3]["document"]["timestamp"].get<size_t>());
+    ASSERT_EQ("0", results["hits"][4]["document"]["id"]);
+    ASSERT_EQ(1728383250, results["hits"][4]["document"]["timestamp"].get<size_t>());
+}
+
+TEST_F(CollectionSortingTest, TextMatchBucketSizeRanking) {
+    std::vector<field> fields = {field("title", field_types::STRING, false),
+                                 field("description", field_types::STRING, false),
+                                 field("points", field_types::INT32, false),};
+
+    Collection *coll1 = collectionManager.create_collection("coll1", 1, fields, "points").get();
+
+    nlohmann::json doc1;
+    doc1["id"] = "0";
+    doc1["title"] = "Mark Antony";
+    doc1["description"] = "Counsellor";
+    doc1["points"] = 100;
+
+    nlohmann::json doc2;
+    doc2["id"] = "1";
+    doc2["title"] = "Marks Spencer";
+    doc2["description"] = "Sales Expert";
+    doc2["points"] = 200;
+
+    nlohmann::json doc3;
+    doc3["id"] = "2";
+    doc3["title"] = "Mark Twain";
+    doc3["description"] = "Writer";
+    doc3["points"] = 100;
+
+    nlohmann::json doc4;
+    doc4["id"] = "3";
+    doc4["title"] = "Mark Zuckerberg";
+    doc4["description"] = "Entrepreneur";
+    doc4["points"] = 300;
+
+    nlohmann::json doc5;
+    doc5["id"] = "4";
+    doc5["title"] = "Marks Henry";
+    doc5["description"] = "Wrestler";
+    doc5["points"] = 200;
+
+    nlohmann::json doc6;
+    doc6["id"] = "5";
+    doc6["title"] = "Mark Hughes";
+    doc6["description"] = "Football Coach";
+    doc6["points"] = 200;
+
+    ASSERT_TRUE(coll1->add(doc1.dump()).ok());
+    ASSERT_TRUE(coll1->add(doc2.dump()).ok());
+    ASSERT_TRUE(coll1->add(doc3.dump()).ok());
+    ASSERT_TRUE(coll1->add(doc4.dump()).ok());
+    ASSERT_TRUE(coll1->add(doc5.dump()).ok());
+    ASSERT_TRUE(coll1->add(doc6.dump()).ok());
+
+    sort_fields = {
+            sort_by("_text_match(bucket_size: 3)", "DESC"),
+            sort_by("points", "DESC"),
+    };
+
+    auto results = coll1->search("mark", {"title"},
+                                 "", {}, sort_fields, {2}, 10,
+                                 1, FREQUENCY, {true},
+                                 10, spp::sparse_hash_set<std::string>(),
+                                 spp::sparse_hash_set<std::string>(), 10, "", 30, 4, "title", 20, {}, {}, {}, 0,
+                                 "<mark>", "</mark>", {3}, 1000, true).get();
+
+    //two buckets will be formed and results will rank as per points among buckets
+    ASSERT_EQ(6, results["hits"].size());
+    ASSERT_EQ("3", results["hits"][0]["document"]["id"].get<std::string>());
+    ASSERT_EQ("5", results["hits"][1]["document"]["id"].get<std::string>());
+    ASSERT_EQ("4", results["hits"][2]["document"]["id"].get<std::string>());
+    ASSERT_EQ("1", results["hits"][3]["document"]["id"].get<std::string>());
+    ASSERT_EQ("2", results["hits"][4]["document"]["id"].get<std::string>());
+    ASSERT_EQ("0", results["hits"][5]["document"]["id"].get<std::string>());
+
+    //in case of bucket_size more than results, no bucketing happens
+    sort_fields = {
+            sort_by("_text_match(bucket_size: 10)", "DESC"),
+            sort_by("points", "DESC"),
+    };
+
+    results = coll1->search("mark", {"title"},
+                            "", {}, sort_fields, {2}, 10,
+                            1, FREQUENCY, {true},
+                            10, spp::sparse_hash_set<std::string>(),
+                            spp::sparse_hash_set<std::string>(), 10, "", 30, 4, "title", 20, {}, {}, {}, 0,
+                            "<mark>", "</mark>", {3}, 1000, true).get();
+
+    ASSERT_EQ(6, results["hits"].size());
+    ASSERT_EQ("3", results["hits"][0]["document"]["id"].get<std::string>());
+    ASSERT_EQ("5", results["hits"][1]["document"]["id"].get<std::string>());
+    ASSERT_EQ("2", results["hits"][2]["document"]["id"].get<std::string>());
+    ASSERT_EQ("0", results["hits"][3]["document"]["id"].get<std::string>());
+    ASSERT_EQ("4", results["hits"][4]["document"]["id"].get<std::string>());
+    ASSERT_EQ("1", results["hits"][5]["document"]["id"].get<std::string>());
+
+    //in case of bucket_size 0, no bucketing happens
+    sort_fields = {
+            sort_by("_text_match(bucket_size: 0)", "DESC"),
+            sort_by("points", "DESC"),
+    };
+
+    results = coll1->search("mark", {"title"},
+                            "", {}, sort_fields, {2}, 10,
+                            1, FREQUENCY, {true},
+                            10, spp::sparse_hash_set<std::string>(),
+                            spp::sparse_hash_set<std::string>(), 10, "", 30, 4, "title", 20, {}, {}, {}, 0,
+                            "<mark>", "</mark>", {3}, 1000, true).get();
+
+    ASSERT_EQ(6, results["hits"].size());
+    ASSERT_EQ("3", results["hits"][0]["document"]["id"].get<std::string>());
+    ASSERT_EQ("5", results["hits"][1]["document"]["id"].get<std::string>());
+    ASSERT_EQ("2", results["hits"][2]["document"]["id"].get<std::string>());
+    ASSERT_EQ("0", results["hits"][3]["document"]["id"].get<std::string>());
+    ASSERT_EQ("4", results["hits"][4]["document"]["id"].get<std::string>());
+    ASSERT_EQ("1", results["hits"][5]["document"]["id"].get<std::string>());
 }

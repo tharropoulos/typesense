@@ -54,7 +54,7 @@ new_git_repository(
 new_git_repository(
     name="clip_tokenizer",
     branch="master",
-    remote="https://github.com/ozanarmagan/clip_tokenizer_cpp",
+    remote="https://github.com/typesense/clip_tokenizer_cpp.git",
     build_file = "//bazel:clip_tokenizer.BUILD",
 )
 
@@ -343,4 +343,12 @@ new_git_repository(
     build_file = "//bazel:snowball.BUILD",
     branch = "master",
     remote = "https://github.com/snowballstem/snowball.git"
+)
+
+http_archive(
+    name = "archive",
+    build_file = "//bazel:archive.BUILD",
+    sha256 = "4cc540a3e9a1eebdefa1045d2e4184831100667e6d7d5b315bb1cbc951f8ddff",
+    strip_prefix = "libarchive-3.7.7",
+    urls = ["https://github.com/libarchive/libarchive/releases/download/v3.7.7/libarchive-3.7.7.tar.gz"],
 )
