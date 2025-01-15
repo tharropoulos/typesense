@@ -501,18 +501,26 @@ void Index::validate_and_preprocess(Index *index,
                     LOG(INFO) << "index_rec.new_doc: " << index_rec.new_doc;
                     LOG(INFO) << "index_rec.del_doc: " << index_rec.del_doc;
                 }*/
-
                 if(generate_embeddings) {
-                    for(auto& field: index_rec.doc.items()) {
-                        for(auto& embedding_field : embedding_fields) {
-                            if(!embedding_field.embed[fields::from].is_null()) {
-                                auto embed_from_vector = embedding_field.embed[fields::from].get<std::vector<std::string>>();
+                    for(auto& embedding_field : embedding_fields) {
+                        auto embed_from_vector = embedding_field.embed[fields::from].get<std::vector<std::string>>();
+                        for(auto& embed_from: embed_from_vector) {
+                            if(index_rec.doc.count(embed_from) != 0) {
+                                
                                 for(auto& embed_from: embed_from_vector) {
-                                    if(embed_from == field.key()) {
-                                        records_to_embed.push_back(&index_rec);
-                                        break;
+                                    if(index_rec.doc.count(embed_from) == 0) {
+                                        // copy the value from old doc to new doc if it is not present in the new doc
+                                        if(index_rec.old_doc.count(embed_from) == 0) {
+                                            index_rec.index_failure(400, "One or more of the fields to embed is missing in the both the old and new documents");
+                                            break;
+                                        }
+                                        index_rec.doc[embed_from] = index_rec.old_doc[embed_from];
                                     }
                                 }
+                                if(index_rec.indexed.ok()) {
+                                    records_to_embed.push_back(&index_rec);
+                                }
+                                break;
                             }
                         }
                     }
@@ -1706,7 +1714,6 @@ Option<bool> Index::search_all_candidates(const size_t num_search_fields,
                                           const std::vector<search_field_t>& the_fields,
                                           filter_result_iterator_t* const filter_result_iterator,
                                           const uint32_t* excluded_result_ids, size_t excluded_result_ids_size,
-                                          const std::unordered_set<uint32_t>& excluded_group_ids,
                                           const std::vector<sort_by>& sort_fields,
                                           std::vector<tok_candidates>& token_candidates_vec,
                                           std::vector<std::vector<art_leaf*>>& searched_queries,
@@ -1782,7 +1789,6 @@ Option<bool> Index::search_all_candidates(const size_t num_search_fields,
                                                              filter_result_iterator,
                                                              total_cost, syn_orig_num_tokens,
                                                              excluded_result_ids, excluded_result_ids_size,
-                                                             excluded_group_ids,
                                                              sort_order, field_values, geopoint_indices,
                                                              id_buff, num_keyword_matches,
                                                              all_result_ids, all_result_ids_len);
@@ -1870,21 +1876,59 @@ void aggregate_nested_references(single_filter_result_t *const reference_result,
 
 template <typename F>
 void negate_left_join(id_list_t* const seq_ids, std::unique_ptr<uint32_t[]>& reference_docs, uint32_t& reference_docs_count,
-                      F&& get_doc_id, std::vector<std::pair<uint32_t, uint32_t>>& id_pairs,
-                      std::unordered_set<uint32_t>& unique_doc_ids,
+                      F&& get_doc_id, const bool& is_match_all_ids_filter, std::vector<std::pair<uint32_t, uint32_t>>& id_pairs,
+                      std::set<uint32_t>& unique_doc_ids,
                       negate_left_join_t& negate_left_join_info) {
-    auto it = seq_ids->new_iterator();
-    auto negate_reference_docs = new uint32_t[seq_ids->num_ids() - reference_docs_count];
+    uint32_t* negate_reference_docs = nullptr;
     size_t negate_index = 0;
-    std::unordered_set<uint32_t> unique_negate_doc_ids;
-    for (size_t i = 0; i < reference_docs_count && it.valid(); i++) {
-        while (it.valid() && it.id() < reference_docs[i]) {
-            const auto& reference_doc_id = it.id();
+    std::set<uint32_t> unique_negate_doc_ids;
+
+    // If the negate join is on all ids like !$CollName(id:*), we don't need to collect any references.
+    if (!is_match_all_ids_filter) {
+        auto it = seq_ids->new_iterator();
+        negate_reference_docs = new uint32_t[seq_ids->num_ids() - reference_docs_count];
+        for (size_t i = 0; i < reference_docs_count && it.valid(); i++) {
+            while (it.valid() && it.id() < reference_docs[i]) {
+                const auto &reference_doc_id = it.id();
+                it.next();
+
+                negate_reference_docs[negate_index++] = reference_doc_id;
+                std::vector<uint32_t> doc_ids = get_doc_id(reference_doc_id);
+                for (const auto &doc_id: doc_ids) {
+                    // If we have 3 products: product_a, product_b, product_c
+                    // and products_viewed like:
+                    // user_a:  [product_a]
+                    // user_b:  [product_a, product_b]
+                    // We should return product_b and product_c for "Products not seen by user_a".
+                    // So rejecting doc_id's already present in unique_doc_ids (product_a in the above example).
+                    if (doc_id == Index::reference_helper_sentinel_value || unique_doc_ids.count(doc_id) != 0) {
+                        continue;
+                    }
+
+                    id_pairs.emplace_back(doc_id, reference_doc_id);
+                    unique_negate_doc_ids.insert(doc_id);
+                }
+            }
+            if (!it.valid()) {
+                break;
+            }
+            while (i + 1 < reference_docs_count &&
+                   (reference_docs[i] + 1 == reference_docs[i + 1])) { // Skip consecutive ids.
+                i++;
+            }
+            it.skip_to(reference_docs[i] + 1);
+        }
+
+        if (reference_docs_count > 0 && it.valid()) {
+            it.skip_to(reference_docs[reference_docs_count - 1] + 1);
+        }
+        while (it.valid()) {
+            const auto &reference_doc_id = it.id();
             it.next();
 
             negate_reference_docs[negate_index++] = reference_doc_id;
             std::vector<uint32_t> doc_ids = get_doc_id(reference_doc_id);
-            for (const auto& doc_id: doc_ids) {
+            for (const auto &doc_id: doc_ids) {
                 // If we have 3 products: product_a, product_b, product_c
                 // and products_viewed like:
                 // user_a:  [product_a]
@@ -1898,38 +1942,6 @@ void negate_left_join(id_list_t* const seq_ids, std::unique_ptr<uint32_t[]>& ref
                 id_pairs.emplace_back(doc_id, reference_doc_id);
                 unique_negate_doc_ids.insert(doc_id);
             }
-        }
-        if (!it.valid()) {
-            break;
-        }
-        while (i + 1 < reference_docs_count && (reference_docs[i] + 1 == reference_docs[i + 1])) { // Skip consecutive ids.
-            i++;
-        }
-        it.skip_to(reference_docs[i] + 1);
-    }
-
-    if (reference_docs_count > 0 && it.valid()) {
-        it.skip_to(reference_docs[reference_docs_count - 1] + 1);
-    }
-    while (it.valid()) {
-        const auto& reference_doc_id = it.id();
-        it.next();
-
-        negate_reference_docs[negate_index++] = reference_doc_id;
-        std::vector<uint32_t> doc_ids = get_doc_id(reference_doc_id);
-        for (const auto& doc_id: doc_ids) {
-            // If we have 3 products: product_a, product_b, product_c
-            // and products_viewed like:
-            // user_a:  [product_a]
-            // user_b:  [product_a, product_b]
-            // We should return product_b and product_c for "Products not seen by user_a".
-            // So rejecting doc_id's already present in unique_doc_ids (product_a in the above example).
-            if (doc_id == Index::reference_helper_sentinel_value || unique_doc_ids.count(doc_id) != 0) {
-                continue;
-            }
-
-            id_pairs.emplace_back(doc_id, reference_doc_id);
-            unique_negate_doc_ids.insert(doc_id);
         }
     }
 
@@ -1953,6 +1965,7 @@ Option<bool> Index::do_reference_filtering_with_lock(filter_node_t* const filter
     std::shared_lock lock(mutex);
 
     const auto& is_normal_join = !negate_left_join_info.is_negate_join;
+    const auto& is_match_all_ids_filter = filter_tree_root->is_match_all_ids_filter();
     auto ref_filter_result_iterator = filter_result_iterator_t(ref_collection_name, this, filter_tree_root, false,
                                                                DEFAULT_FILTER_BY_CANDIDATES,
                                                                search_begin_us, search_stop_us, validate_field_names);
@@ -2058,7 +2071,7 @@ Option<bool> Index::do_reference_filtering_with_lock(filter_node_t* const filter
 
         // Collect all the doc ids from the reference ids.
         std::vector<std::pair<uint32_t, uint32_t>> id_pairs;
-        std::unordered_set<uint32_t> unique_doc_ids;
+        std::set<uint32_t> unique_doc_ids;
 
         for (uint32_t i = 0; i < count; i++) {
             auto& reference_doc_id = reference_docs[i];
@@ -2086,7 +2099,7 @@ Option<bool> Index::do_reference_filtering_with_lock(filter_node_t* const filter
                                  }
                                  return std::vector<uint32_t>(1, it->second);
                              },
-                             id_pairs, unique_doc_ids, negate_left_join_info);
+                             is_match_all_ids_filter, id_pairs, unique_doc_ids, negate_left_join_info);
         }
 
         if (id_pairs.empty()) {
@@ -2218,7 +2231,7 @@ Option<bool> Index::do_reference_filtering_with_lock(filter_node_t* const filter
     }
 
     std::vector<std::pair<uint32_t, uint32_t>> id_pairs;
-    std::unordered_set<uint32_t> unique_doc_ids;
+    std::set<uint32_t> unique_doc_ids;
 
     for (uint32_t i = 0; i < count; i++) {
         auto& reference_doc_id = reference_docs[i];
@@ -2249,7 +2262,7 @@ Option<bool> Index::do_reference_filtering_with_lock(filter_node_t* const filter
                              delete[] doc_ids;
                              return vec;
                          },
-                         id_pairs, unique_doc_ids, negate_left_join_info);
+                         is_match_all_ids_filter, id_pairs, unique_doc_ids, negate_left_join_info);
     }
 
     if (id_pairs.empty()) {
@@ -2519,11 +2532,16 @@ Option<bool> Index::run_search(search_args* search_params) {
 void Index::collate_included_ids(const std::vector<token_t>& q_included_tokens,
                                  const std::map<size_t, std::map<size_t, uint32_t>> & included_ids_map,
                                  Topster<KV>*& curated_topster,
+                                 const size_t group_limit,
+                                 const std::vector<std::string>& group_by_fields,
+                                 const bool group_missing_values,
                                  std::vector<std::vector<art_leaf*>> & searched_queries) const {
 
     if(included_ids_map.empty()) {
         return;
     }
+
+    std::vector<group_by_field_it_t> group_by_field_it_vec;
 
     for(const auto& pos_ids: included_ids_map) {
         const size_t outer_pos = pos_ids.first;
@@ -2532,14 +2550,17 @@ void Index::collate_included_ids(const std::vector<token_t>& q_included_tokens,
             uint32_t inner_pos = index_seq_id.first;
             uint32_t seq_id = index_seq_id.second;
 
-            uint64_t distinct_id = outer_pos;                           // outer pos is the group distinct key
-            uint64_t match_score = (64000 - outer_pos - inner_pos);    // both outer pos and inner pos inside group
-
-            // LOG(INFO) << "seq_id: " << seq_id << " - " << match_score;
+            uint64_t distinct_id = 1;
+            if (group_limit != 0) {
+                group_by_field_it_vec = get_group_by_field_iterators(group_by_fields, true);
+            }
+            for(auto& kv : group_by_field_it_vec) {
+                get_distinct_id(kv.it, seq_id, kv.is_array, group_missing_values, distinct_id, true);
+            }
 
             int64_t scores[3];
-            scores[0] = match_score;
-            scores[1] = int64_t(1);
+            scores[0] = -outer_pos;
+            scores[1] = -(inner_pos + 1);
             scores[2] = int64_t(1);
 
             KV kv(0, seq_id, distinct_id, 0, scores);
@@ -2840,7 +2861,7 @@ bool Index::check_for_overrides(const token_ordering& token_order, const string&
 
             auto fuzzy_search_fields_op = fuzzy_search_fields(
                     fq_fields, window_tokens, {}, text_match_type_t::max_score, nullptr, 0,
-                    &filter_result_it, {}, {}, sort_fields, {0}, searched_queries,
+                    &filter_result_it, {}, sort_fields, {0}, searched_queries,
                     qtoken_set, topster, groups_processed, result_ids, result_ids_len,
                     0, group_by_fields, false, true, false, false, query_hashes, MAX_SCORE, {false}, 1,
                     false, 4, 3, 7, 0, nullptr, field_values, geopoint_indices, "", true);
@@ -3164,13 +3185,13 @@ Option<bool> Index::search(std::vector<query_tokens_t>& field_query_tokens, cons
     std::set<uint32_t> curated_ids;
     std::map<size_t, std::map<size_t, uint32_t>> included_ids_map;  // outer pos => inner pos => list of IDs
     std::vector<uint32_t> included_ids_vec;
-    std::unordered_set<uint32_t> excluded_group_ids;
 
     process_curated_ids(included_ids, excluded_ids, group_by_fields, group_limit, 
                         group_missing_values, filter_curated_hits,
                         filter_result_iterator, curated_ids, included_ids_map,
-                        included_ids_vec, excluded_group_ids);
-    collate_included_ids({}, included_ids_map, curated_topster, searched_queries);
+                        included_ids_vec);
+    collate_included_ids({}, included_ids_map, curated_topster, group_limit,
+                         group_by_fields, group_missing_values, searched_queries);
     filter_result_iterator->reset();
     search_cutoff = search_cutoff || filter_result_iterator->validity == filter_result_iterator_t::timed_out;
 
@@ -3225,7 +3246,7 @@ Option<bool> Index::search(std::vector<query_tokens_t>& field_query_tokens, cons
                                                     topster, sort_order, field_values, geopoint_indices,
                                                     filter_result_iterator, all_result_ids, all_result_ids_len,
                                                     groups_processed,
-                                                    excluded_result_ids, excluded_result_ids_size, excluded_group_ids,
+                                                    excluded_result_ids, excluded_result_ids_size,
                                                     is_wildcard_query);
 
         filter_iterator_guard.release();
@@ -3261,9 +3282,6 @@ Option<bool> Index::search(std::vector<query_tokens_t>& field_query_tokens, cons
                     distinct_id = 1;
                     for(auto& kv : group_by_field_it_vec) {
                         get_distinct_id(kv.it, seq_id, kv.is_array, group_missing_values, distinct_id, true);
-                    }
-                    if(excluded_group_ids.count(distinct_id) != 0) {
-                        continue;
                     }
 
                     if(groups_processed.size() == fetch_size) {
@@ -3345,10 +3363,6 @@ Option<bool> Index::search(std::vector<query_tokens_t>& field_query_tokens, cons
                     for(auto &kv : group_by_field_it_vec) {
                         get_distinct_id(kv.it, seq_id, kv.is_array, group_missing_values, distinct_id);
                     }
-
-                    if(excluded_group_ids.count(distinct_id) != 0) {
-                       continue;
-                   }
                 }
 
                 auto vec_dist_score = (field_vector_index->distance_type == cosine) ? std::abs(dist_result.first) :
@@ -3400,9 +3414,9 @@ Option<bool> Index::search(std::vector<query_tokens_t>& field_query_tokens, cons
             }
 
             auto search_wildcard_op = search_wildcard(filter_tree_root.get(), sort_fields_std, topster,
-                                                      curated_topster, groups_processed, searched_queries, group_limit, group_by_fields,
+                                                      groups_processed, searched_queries, group_limit, group_by_fields,
                                                       group_missing_values,
-                                                      excluded_result_ids, excluded_result_ids_size, excluded_group_ids,
+                                                      excluded_result_ids, excluded_result_ids_size,
                                                       all_result_ids, all_result_ids_len,
                                                       filter_result_iterator, concurrency,
                                                       sort_order, field_values, geopoint_indices);
@@ -3480,7 +3494,7 @@ Option<bool> Index::search(std::vector<query_tokens_t>& field_query_tokens, cons
         auto fuzzy_search_fields_op = fuzzy_search_fields(the_fields, field_query_tokens[0].q_include_tokens, {}, match_type,
                                                           excluded_result_ids, excluded_result_ids_size,
                                                           filter_result_iterator, curated_ids_sorted,
-                                                          excluded_group_ids, sort_fields_std, num_typos,
+                                                          sort_fields_std, num_typos,
                                                           searched_queries, qtoken_set, topster, groups_processed,
                                                           all_result_ids, all_result_ids_len,
                                                           group_limit, group_by_fields, group_missing_values, prioritize_exact_match,
@@ -3525,7 +3539,6 @@ Option<bool> Index::search(std::vector<query_tokens_t>& field_query_tokens, cons
 
                 auto fuzzy_search_fields_op = fuzzy_search_fields(the_fields, resolved_tokens, {}, match_type, excluded_result_ids,
                                                                   excluded_result_ids_size, filter_result_iterator, curated_ids_sorted,
-                                                                  excluded_group_ids,
                                                                   sort_fields_std, num_typos, searched_queries,
                                                                   qtoken_set, topster, groups_processed,
                                                                   all_result_ids, all_result_ids_len,
@@ -3544,11 +3557,11 @@ Option<bool> Index::search(std::vector<query_tokens_t>& field_query_tokens, cons
 
         // do synonym based searches
        auto do_synonym_search_op = do_synonym_search(the_fields, match_type, filter_tree_root.get(),
-                                                     sort_fields_std, curated_topster, token_order, 0, group_limit,
+                                                     sort_fields_std, token_order, 0, group_limit,
                                                      group_by_fields, group_missing_values, prioritize_exact_match, prioritize_token_position,
                                                      prioritize_num_matching_fields, exhaustive_search, concurrency, prefixes,
                                                      min_len_1typo, min_len_2typo, max_candidates, curated_ids, curated_ids_sorted,
-                                                     excluded_result_ids, excluded_result_ids_size, excluded_group_ids,
+                                                     excluded_result_ids, excluded_result_ids_size,
                                                      topster, q_pos_synonyms, syn_orig_num_tokens,
                                                      groups_processed, searched_queries, all_result_ids, all_result_ids_len,
                                                      filter_result_iterator, query_hashes,
@@ -3629,7 +3642,7 @@ Option<bool> Index::search(std::vector<query_tokens_t>& field_query_tokens, cons
                         auto fuzzy_search_fields_op = fuzzy_search_fields(the_fields, truncated_tokens, dropped_tokens, match_type,
                                                                           excluded_result_ids, excluded_result_ids_size,
                                                                           filter_result_iterator,
-                                                                          curated_ids_sorted, excluded_group_ids,
+                                                                          curated_ids_sorted,
                                                                           sort_fields_std, num_typos, searched_queries,
                                                                           qtoken_set, topster, groups_processed, 
                                                                           all_result_ids, all_result_ids_len,
@@ -3657,7 +3670,7 @@ Option<bool> Index::search(std::vector<query_tokens_t>& field_query_tokens, cons
                                                    field_query_tokens[0].q_include_tokens,
                                                    topster, filter_result_iterator,
                                                    sort_order, field_values, geopoint_indices,
-                                                   curated_ids_sorted, excluded_group_ids,
+                                                   curated_ids_sorted,
                                                    all_result_ids, all_result_ids_len, groups_processed);
         if (!do_infix_search_op.ok()) {
             return do_infix_search_op;
@@ -3831,10 +3844,6 @@ Option<bool> Index::search(std::vector<query_tokens_t>& field_query_tokens, cons
 
                             for(auto& kv : group_by_field_it_vec) {
                                 get_distinct_id(kv.it, seq_id, kv.is_array, group_missing_values, distinct_id);
-                            }
-
-                            if(excluded_group_ids.count(distinct_id) != 0) {
-                                continue;
                             }
                         }
                         KV kv(searched_queries.size(), seq_id, distinct_id, match_score_index, scores, std::move(references));
@@ -4188,8 +4197,7 @@ void Index::process_curated_ids(const std::vector<std::pair<uint32_t, uint32_t>>
                                 const bool filter_curated_hits, filter_result_iterator_t* const filter_result_iterator,
                                 std::set<uint32_t>& curated_ids,
                                 std::map<size_t, std::map<size_t, uint32_t>>& included_ids_map,
-                                std::vector<uint32_t>& included_ids_vec,
-                                std::unordered_set<uint32_t>& excluded_group_ids) const {
+                                std::vector<uint32_t>& included_ids_vec) const {
 
     for(const auto& seq_id_pos: included_ids) {
         included_ids_vec.push_back(seq_id_pos.first);
@@ -4207,8 +4215,6 @@ void Index::process_curated_ids(const std::vector<std::pair<uint32_t, uint32_t>>
             for(auto& kv : group_by_field_it_vec) {
                 get_distinct_id(kv.it, seq_id, kv.is_array, group_missing_values, distinct_id);
             }
-
-            excluded_group_ids.emplace(distinct_id);
         }
     }
 
@@ -4288,7 +4294,6 @@ Option<bool> Index::fuzzy_search_fields(const std::vector<search_field_t>& the_f
                                         size_t excluded_result_ids_size,
                                         filter_result_iterator_t* const filter_result_iterator,
                                         const std::vector<uint32_t>& curated_ids,
-                                        const std::unordered_set<uint32_t>& excluded_group_ids,
                                         const std::vector<sort_by> & sort_fields,
                                         const std::vector<uint32_t>& num_typos,
                                         std::vector<std::vector<art_leaf*>> & searched_queries,
@@ -4558,7 +4563,7 @@ Option<bool> Index::fuzzy_search_fields(const std::vector<search_field_t>& the_f
             std::vector<uint32_t> id_buff;
             auto search_all_candidates_op = search_all_candidates(num_search_fields, match_type, the_fields,
                                                                   filter_result_iterator,
-                                                                  excluded_result_ids, excluded_result_ids_size, excluded_group_ids,
+                                                                  excluded_result_ids, excluded_result_ids_size,
                                                                   sort_fields, token_candidates_vec, searched_queries, qtoken_set,
                                                                   dropped_tokens, topster,
                                                                   groups_processed, num_keyword_matches, all_result_ids, all_result_ids_len,
@@ -4894,7 +4899,6 @@ Option<bool> Index::search_across_fields(const std::vector<token_t>& query_token
                                          filter_result_iterator_t* const filter_result_iterator,
                                          const uint32_t total_cost, const int syn_orig_num_tokens,
                                          const uint32_t* excluded_result_ids, size_t excluded_result_ids_size,
-                                         const std::unordered_set<uint32_t>& excluded_group_ids,
                                          const int* sort_order,
                                          std::array<spp::sparse_hash_map<uint32_t, int64_t, Hasher32>*, 3>& field_values,
                                          const std::vector<size_t>& geopoint_indices,
@@ -4996,10 +5000,6 @@ Option<bool> Index::search_across_fields(const std::vector<token_t>& query_token
              distinct_id = 1;
              for(auto& kv : group_by_field_it_vec) {
                  get_distinct_id(kv.it, seq_id, kv.is_array, group_missing_values, distinct_id);
-             }
-
-             if(excluded_group_ids.count(distinct_id) != 0) {
-                 return;
              }
          }
 
@@ -5351,7 +5351,6 @@ Option<bool> Index::do_phrase_search(const size_t num_search_fields, const std::
                                      uint32_t*& all_result_ids, size_t& all_result_ids_len,
                                      spp::sparse_hash_map<uint64_t, uint32_t>& groups_processed,
                                      const uint32_t* excluded_result_ids, size_t excluded_result_ids_size,
-                                     const std::unordered_set<uint32_t>& excluded_group_ids,
                                      bool is_wildcard_query) const {
 
     uint32_t* phrase_result_ids = nullptr;
@@ -5500,10 +5499,6 @@ Option<bool> Index::do_phrase_search(const size_t num_search_fields, const std::
             for(auto& kv : group_by_field_it_vec) {
                 get_distinct_id(kv.it, seq_id, kv.is_array, group_missing_values, distinct_id);
             }
-
-            if(excluded_group_ids.count(distinct_id) != 0) {
-                continue;
-            }
         }
 
         KV kv(searched_queries.size(), seq_id, distinct_id, match_score_index, scores, std::move(references));
@@ -5527,7 +5522,7 @@ Option<bool> Index::do_phrase_search(const size_t num_search_fields, const std::
 Option<bool> Index::do_synonym_search(const std::vector<search_field_t>& the_fields,
                                       const text_match_type_t match_type,
                                       filter_node_t const* const& filter_tree_root,
-                                      const std::vector<sort_by>& sort_fields_std, Topster<KV>*& curated_topster,
+                                      const std::vector<sort_by>& sort_fields_std,
                                       const token_ordering& token_order,
                                       const size_t typo_tokens_threshold, const size_t group_limit,
                                       const std::vector<std::string>& group_by_fields, 
@@ -5541,7 +5536,6 @@ Option<bool> Index::do_synonym_search(const std::vector<search_field_t>& the_fie
                                       size_t min_len_2typo, const size_t max_candidates, const std::set<uint32_t>& curated_ids,
                                       const std::vector<uint32_t>& curated_ids_sorted, const uint32_t* exclude_token_ids,
                                       size_t exclude_token_ids_size,
-                                      const std::unordered_set<uint32_t>& excluded_group_ids,
                                       Topster<KV>* actual_topster,
                                       std::vector<std::vector<token_t>>& q_pos_synonyms,
                                       int syn_orig_num_tokens,
@@ -5559,7 +5553,7 @@ Option<bool> Index::do_synonym_search(const std::vector<search_field_t>& the_fie
         query_hashes.clear();
         auto fuzzy_search_fields_op = fuzzy_search_fields(the_fields, syn_tokens, {}, match_type, exclude_token_ids,
                                                           exclude_token_ids_size, filter_result_iterator,
-                                                          curated_ids_sorted, excluded_group_ids, sort_fields_std, {0},
+                                                          curated_ids_sorted, sort_fields_std, {0},
                                                           searched_queries, qtoken_set, actual_topster, groups_processed,
                                                           all_result_ids, all_result_ids_len, group_limit, group_by_fields,
                                                           group_missing_values,
@@ -5591,7 +5585,6 @@ Option<bool> Index::do_infix_search(const size_t num_search_fields, const std::v
                                     std::array<spp::sparse_hash_map<uint32_t, int64_t, Hasher32>*, 3> field_values,
                                     const std::vector<size_t>& geopoint_indices,
                                     const std::vector<uint32_t>& curated_ids_sorted,
-                                    const std::unordered_set<uint32_t>& excluded_group_ids,
                                     uint32_t*& all_result_ids, size_t& all_result_ids_len,
                                     spp::sparse_hash_map<uint64_t, uint32_t>& groups_processed,
                                     const std::string& collection_name) const {
@@ -5676,10 +5669,6 @@ Option<bool> Index::do_infix_search(const size_t num_search_fields, const std::v
                         for(auto& kv : group_by_field_it_vec) {
                             get_distinct_id(kv.it, seq_id, kv.is_array, group_missing_values, distinct_id);
                         }
-
-                        if(excluded_group_ids.count(distinct_id) != 0) {
-                           continue;
-                       }
                     }
 
                     KV kv(searched_queries.size(), seq_id, distinct_id, match_score_index, scores, std::move(references));
@@ -5861,7 +5850,7 @@ void Index::compute_facet_infos(const std::vector<facet>& facets, facet_query_t&
             const std::vector<size_t> geopoint_indices;
 
             auto fuzzy_search_fields_op = fuzzy_search_fields(fq_fields, qtokens, {}, text_match_type_t::max_score, nullptr, 0,
-                                &filter_result_it, {}, {}, sort_fields, {facet_query_num_typos}, searched_queries,
+                                &filter_result_it, {}, sort_fields, {facet_query_num_typos}, searched_queries,
                                 qtoken_set, topster, groups_processed, field_result_ids, field_result_ids_len,
                                 group_limit, group_by_fields, false, true, false, false, query_hashes, MAX_SCORE, {true}, 1,
                                 false, max_candidates, 3, 7, 0, nullptr, field_values, geopoint_indices, "", true);
@@ -5988,13 +5977,13 @@ void Index::curate_filtered_ids(const uint32_t* exclude_token_ids, size_t exclud
 }
 
 Option<bool> Index::search_wildcard(filter_node_t const* const& filter_tree_root,
-                                    const std::vector<sort_by>& sort_fields, Topster<KV>*& topster, Topster<KV>*& curated_topster,
+                                    const std::vector<sort_by>& sort_fields, Topster<KV>*& topster,
                                     spp::sparse_hash_map<uint64_t, uint32_t>& groups_processed,
                                     std::vector<std::vector<art_leaf*>>& searched_queries, const size_t group_limit,
                                     const std::vector<std::string>& group_by_fields, 
                                     const bool group_missing_values,
                                     const uint32_t* exclude_token_ids,
-                                    size_t exclude_token_ids_size, const std::unordered_set<uint32_t>& excluded_group_ids,
+                                    size_t exclude_token_ids_size,
                                     uint32_t*& all_result_ids, size_t& all_result_ids_len,
                                     filter_result_iterator_t* const filter_result_iterator,
                                     const size_t concurrency,
@@ -6052,7 +6041,7 @@ Option<bool> Index::search_wildcard(filter_node_t const* const& filter_tree_root
         thread_pool->enqueue([this, &parent_search_begin, &parent_search_stop_ms, &parent_search_cutoff,
                               thread_id, &sort_fields, &searched_queries,
                               &group_limit, &group_by_fields, group_missing_values, 
-                              &topsters, &tgroups_processed, &excluded_group_ids,
+                              &topsters, &tgroups_processed,
                               &sort_order, field_values, &geopoint_indices, &plists,
                               check_for_circuit_break,
                               batch_result,
@@ -6104,10 +6093,6 @@ Option<bool> Index::search_wildcard(filter_node_t const* const& filter_tree_root
                     for(auto& kv : group_by_field_it_vec) {
                         get_distinct_id(kv.it, seq_id, kv.is_array, group_missing_values, distinct_id);
                     }
-
-                    if(excluded_group_ids.count(distinct_id) != 0) {
-                       continue;
-                   }
                 }
 
                 KV kv(searched_queries.size(), seq_id, distinct_id, match_score_index, scores, std::move(references));
@@ -7359,16 +7344,11 @@ void Index::batch_embed_fields(std::vector<index_record*>& records,
         
         // get vector of values
         std::vector<std::string> values_text, values_image;
-
-        std::unordered_set<index_record*> records_to_index;
-        for(const auto& value_to_embed : values_to_embed_text) {
-            values_text.push_back(value_to_embed.second);
-            records_to_index.insert(value_to_embed.first);  
+        for(auto& record : values_to_embed_text) {
+            values_text.push_back(record.second);
         }
-
-        for(const auto& value_to_embed : values_to_embed_image) {
-            values_image.push_back(value_to_embed.second);
-            records_to_index.insert(value_to_embed.first);
+        for(auto& record : values_to_embed_image) {
+            values_image.push_back(record.second);
         }
 
         EmbedderManager& embedder_manager = EmbedderManager::get_instance();
@@ -7396,65 +7376,53 @@ void Index::batch_embed_fields(std::vector<index_record*>& records,
                                                             remote_embedding_num_tries);
         }
 
-        for(auto& record: records_to_index) {
-            size_t count = 0;
-            if(!values_to_embed_text.empty()) {
-                process_embed_results(values_to_embed_text, record, embeddings_text, count, field);
-            }
-
-            if(!values_to_embed_image.empty()) {
-                process_embed_results(values_to_embed_image, record, embeddings_image, count, field);
-            }
-
-            if(count > 1) {
-                auto& doc = record->is_update ? record->new_doc : record->doc;
-                std::vector<float> existing_embedding = doc[field.name].get<std::vector<float>>();
-                // average embeddings
-                for(size_t i = 0; i < existing_embedding.size(); i++) {
-                    existing_embedding[i] /= count;
-                }
-                doc[field.name] = existing_embedding;
-            }
-        }
+        process_embed_results(values_to_embed_text, embeddings_text, values_to_embed_image, embeddings_image, field);
     }
 }
 
-void Index::process_embed_results(std::vector<std::pair<index_record*, std::string>>& values_to_embed,
-                                     const index_record* record,
-                                     const std::vector<embedding_res_t>& embedding_results,
-                                     size_t& count, const field& the_field) {
-    for(size_t i = 0; i < values_to_embed.size(); i++) {
-        auto& value_to_embed = values_to_embed[i];
-        if(record == value_to_embed.first) {
-            if(!value_to_embed.first->embedding_res.empty()) {
-                continue;
-            }
-
-            if(!embedding_results[i].success) {
-                value_to_embed.first->embedding_res = embedding_results[i].error;
-                value_to_embed.first->index_failure(embedding_results[i].status_code, "");
-                continue;
-            }
-
-            std::vector<float> embedding_vals;
-            auto& doc = value_to_embed.first->is_update ? value_to_embed.first->new_doc : value_to_embed.first->doc;
-            if(doc.count(the_field.name) == 0) {
-                embedding_vals = embedding_results[i].embedding;
-            } else {
-                std::vector<float> existing_embedding = doc[the_field.name].get<std::vector<float>>();
-                // accumulate embeddings
-                for(size_t j = 0; j < existing_embedding.size(); j++) {
-                    existing_embedding[j] += embedding_results[i].embedding[j];
-                }
-                embedding_vals = existing_embedding;
-            }
-
-            // `new_doc` is written to disk (contains complete document with old+new changes)
-            // `doc` represents the delta to be indexed, so we have to populate both.
-            value_to_embed.first->new_doc[the_field.name] = embedding_vals;
-            value_to_embed.first->doc[the_field.name] = embedding_vals;
-            count++;
+void Index::process_embed_results(const std::vector<std::pair<index_record*, std::string>>& values_to_embed_text,
+                                  const std::vector<embedding_res_t>& embeddings_text,
+                                  const std::vector<std::pair<index_record*, std::string>>& values_to_embed_image,
+                                  const std::vector<embedding_res_t>& embeddings_image,
+                                  const field& the_field) {
+    std::unordered_map<index_record*, std::vector<embedding_res_t>> index_records_to_embeddings;
+    for(size_t i = 0; i < values_to_embed_text.size(); i++) {
+        if(!embeddings_text[i].success) {
+            values_to_embed_text[i].first->embedding_res = embeddings_text[i].error;
+            values_to_embed_text[i].first->index_failure(embeddings_text[i].status_code, "");
+            continue;
         }
+        index_records_to_embeddings[values_to_embed_text[i].first].push_back(embeddings_text[i]);
+    }
+
+    for(size_t i = 0; i < values_to_embed_image.size(); i++) {
+        if(!embeddings_image[i].success) {
+            values_to_embed_image[i].first->embedding_res = embeddings_image[i].error;
+            values_to_embed_image[i].first->index_failure(embeddings_image[i].status_code, "");
+            continue;
+        }
+        index_records_to_embeddings[values_to_embed_image[i].first].push_back(embeddings_image[i]);
+    }
+
+    // get average embeddings for each record
+    for(auto& record: index_records_to_embeddings) {
+        if(!record.first->indexed.ok()) {
+            continue;
+        }
+        
+        embedding_res_t avg_embedding(record.second[0].embedding);
+
+        for(size_t i = 1; i < record.second.size(); i++) {
+            for(size_t j = 0; j < avg_embedding.embedding.size(); j++) {
+                avg_embedding.embedding[j] += record.second[i].embedding[j];
+            }
+        }
+
+        for(size_t j = 0; j < avg_embedding.embedding.size(); j++) {
+            avg_embedding.embedding[j] /= record.second.size();
+        }
+        record.first->new_doc[the_field.name] = avg_embedding.embedding;
+        record.first->doc[the_field.name] = avg_embedding.embedding;
     }
 }
 

@@ -244,6 +244,7 @@ export class FilesystemService {
   private handleNonExistingDirectory(
     directory: string,
   ): ResultAsync<string, ErrorWithMessage> {
+
     if (this.yesToAll) {
       return ResultAsync.fromPromise(
         mkdir(directory, { recursive: true }),
