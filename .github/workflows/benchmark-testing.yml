@@ -5,6 +5,8 @@ on:
   pull_request:
     types: [opened, synchronize]
   push:
+    branches:
+      - main
 
 # Cancel previous running if a new push is made
 concurrency:
@@ -76,6 +78,9 @@ jobs:
         run: |
           mkdir -p ./influxdb-data
           sudo chown -R 999:999 ./influxdb-data
+
+      - name: Start containers
+        run: docker compose up -d
 
       - name: Wait for InfluxDB to be ready
         run: |
