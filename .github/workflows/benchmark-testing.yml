@@ -5,8 +5,7 @@ on:
   pull_request:
     types: [opened, synchronize]
   push:
-    branches:
-      - main
+
 
 # Cancel previous running if a new push is made
 concurrency:
@@ -33,6 +32,20 @@ jobs:
             echo "base_sha=${{ github.event.before }}" >> $GITHUB_OUTPUT
           fi
 
+      # Get previous successful run ID
+      - name: Get previous run ID
+        id: get-runs
+        run: |
+          RUNS=$(gh api -H "Accept: application/vnd.github+json" \
+            /repos/${{ github.repository }}/actions/workflows/tests.yml/runs \
+            -q '.workflow_runs[] | select(.conclusion == "success") | .id' \
+            --paginate | head -n 2)
+
+          echo "latest_run=$(echo "$RUNS" | head -n 1)" >> $GITHUB_OUTPUT
+          echo "previous_run=$(echo "$RUNS" | tail -n 1)" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       # Download latest version binary
       - name: Download Latest Version Binary
         uses: dawidd6/action-download-artifact@v2
@@ -40,7 +53,7 @@ jobs:
           workflow: tests.yml
           name: typesense-server
           path: ./current-binary
-          search_artifacts: true
+          run_id: ${{ steps.get-runs.outputs.latest_run }}
           workflow_conclusion: success
 
       # Download previous version binary
@@ -50,11 +63,8 @@ jobs:
           workflow: tests.yml
           name: typesense-server
           path: ./base-binary
-          search_artifacts: true
-          skip_unpack: false
+          run_id: ${{ steps.get-runs.outputs.previous_run }}
           workflow_conclusion: success
-          check_artifacts: true
-          search_previous: true
 
       # Make binaries executable
       - name: Make binaries executable
@@ -79,10 +89,15 @@ jobs:
           mkdir -p ./influxdb-data
           sudo chown -R 999:999 ./influxdb-data
 
+      - name: Install Python dependencies
+        run: pip install influxdb
+
       - name: Start containers
+        working-directory: benchmark
         run: docker compose up -d
 
       - name: Wait for InfluxDB to be ready
+        working-directory: benchmark
         run: |
           timeout 30s bash -c '
           until curl -s http://localhost:8086/ping; do
@@ -111,9 +126,11 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          # Print the SHAs for reference
+          # Print the SHAs and run IDs for reference
           echo "Current SHA: ${{ steps.get-shas.outputs.current_sha }}"
           echo "Base SHA: ${{ steps.get-shas.outputs.base_sha }}"
+          echo "Latest Run ID: ${{ steps.get-runs.outputs.latest_run }}"
+          echo "Previous Run ID: ${{ steps.get-runs.outputs.previous_run }}"
           
           ./dist/index.js benchmark \
             --binaries $(pwd)/../current-binary/typesense-server $(pwd)/../base-binary/typesense-server \
@@ -142,4 +159,5 @@ jobs:
 
       - name: Stop containers
         if: always()
+        working-directory: benchmark
         run: docker compose down
