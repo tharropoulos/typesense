@@ -127,7 +127,7 @@ jobs:
           ./dist/index.js benchmark \
             --binaries $(pwd)/../current-binary/typesense-server $(pwd)/../base-binary/typesense-server \
             -c ${{ steps.get-runs.outputs.latest_sha }} ${{ steps.get-runs.outputs.previous_sha }} \
-            --working-directory $(pwd)/../tmp/benchmark \
+            --working-directory $(pwd)/benchmark-workdir \
             -y -v \
             --duration 1s
 
