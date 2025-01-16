@@ -6,7 +6,6 @@ on:
     types: [opened, synchronize]
   push:
 
-
 # Cancel previous running if a new push is made
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -78,19 +77,18 @@ jobs:
         with:
           name: benchmark-data
           workflow: benchmark-testing.yml
-          path: ./influxdb-data
+          path: ./benchmark/influxdb-data
           search_artifacts: true
           workflow_conclusion: success
         continue-on-error: true
 
       # Prepare InfluxDB
       - name: Prepare data directory
+        working-directory: benchmark
         run: |
           mkdir -p ./influxdb-data
           sudo chown -R 999:999 ./influxdb-data
 
-      - name: Install Python dependencies
-        run: pip install influxdb
 
       - name: Start containers
         working-directory: benchmark
@@ -137,11 +135,12 @@ jobs:
             -c ${{ steps.get-shas.outputs.current_sha }} ${{ steps.get-shas.outputs.base_sha }} \
             --working-directory $(pwd)/../tmp/benchmark \
             -y -v \
-            --duration 10s
+            --duration 1s
 
       # Fix permissions and save data
       - name: Fix permissions for artifact upload
         if: always()
+        working-directory: benchmark
         run: |
           sudo chown -R $USER:$USER ./influxdb-data
           sudo find ./influxdb-data -type d -exec chmod 755 {} \;
@@ -152,7 +151,7 @@ jobs:
         if: always()
         with:
           name: benchmark-data
-          path: ./influxdb-data
+          path: ./benchmark/influxdb-data
           if-no-files-found: warn
           compression-level: 6
           overwrite: false
