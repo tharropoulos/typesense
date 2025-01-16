@@ -2,7 +2,6 @@ name: Benchmark Testing
 
 on: workflow_dispatch  
 
-# Cancel previous running if a new push is made
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -15,29 +14,31 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # Get the current and base commit SHAs (for reference only)
-      - name: Get commit SHAs
-        id: get-shas
-        run: |
-          if [ "${{ github.event_name }}" == "pull_request" ]; then
-            echo "current_sha=${{ github.event.pull_request.head.sha }}" >> $GITHUB_OUTPUT
-            echo "base_sha=${{ github.event.pull_request.base.sha }}" >> $GITHUB_OUTPUT
-          else
-            echo "current_sha=${{ github.sha }}" >> $GITHUB_OUTPUT
-            echo "base_sha=${{ github.event.before }}" >> $GITHUB_OUTPUT
-          fi
-
-      # Get previous successful run ID
-      - name: Get previous run ID
+      # Get latest two successful runs from main
+      - name: Get run IDs and SHAs
         id: get-runs
         run: |
-          RUNS=$(gh api -H "Accept: application/vnd.github+json" \
+          # Get the last two successful runs from main branch
+          RUNS_INFO=$(gh api -H "Accept: application/vnd.github+json" \
             /repos/${{ github.repository }}/actions/workflows/tests.yml/runs \
-            -q '.workflow_runs[] | select(.conclusion == "success") | .id' \
+            -q '.workflow_runs[] | select(.conclusion == "success" and .head_branch == "main") | {id: .id, sha: .head_sha}' \
             --paginate | head -n 2)
-
-          echo "latest_run=$(echo "$RUNS" | head -n 1)" >> $GITHUB_OUTPUT
-          echo "previous_run=$(echo "$RUNS" | tail -n 1)" >> $GITHUB_OUTPUT
+          
+          # Extract the latest run info
+          LATEST_RUN=$(echo "$RUNS_INFO" | head -n 1)
+          LATEST_ID=$(echo "$LATEST_RUN" | jq -r '.id')
+          LATEST_SHA=$(echo "$LATEST_RUN" | jq -r '.sha')
+          
+          # Extract the previous run info
+          PREVIOUS_RUN=$(echo "$RUNS_INFO" | tail -n 1)
+          PREVIOUS_ID=$(echo "$PREVIOUS_RUN" | jq -r '.id')
+          PREVIOUS_SHA=$(echo "$PREVIOUS_RUN" | jq -r '.sha')
+          
+          # Set outputs
+          echo "latest_run=$LATEST_ID" >> $GITHUB_OUTPUT
+          echo "previous_run=$PREVIOUS_ID" >> $GITHUB_OUTPUT
+          echo "latest_sha=$LATEST_SHA" >> $GITHUB_OUTPUT
+          echo "previous_sha=$PREVIOUS_SHA" >> $GITHUB_OUTPUT
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -85,7 +86,6 @@ jobs:
           mkdir -p ./influxdb-data
           sudo chown -R 999:999 ./influxdb-data
 
-
       - name: Start containers
         working-directory: benchmark
         run: docker compose up -d
@@ -120,15 +120,13 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          # Print the SHAs and run IDs for reference
-          echo "Current SHA: ${{ steps.get-shas.outputs.current_sha }}"
-          echo "Base SHA: ${{ steps.get-shas.outputs.base_sha }}"
-          echo "Latest Run ID: ${{ steps.get-runs.outputs.latest_run }}"
-          echo "Previous Run ID: ${{ steps.get-runs.outputs.previous_run }}"
+          # Print the SHAs for reference
+          echo "Latest SHA: ${{ steps.get-runs.outputs.latest_sha }}"
+          echo "Previous SHA: ${{ steps.get-runs.outputs.previous_sha }}"
           
           ./dist/index.js benchmark \
             --binaries $(pwd)/../current-binary/typesense-server $(pwd)/../base-binary/typesense-server \
-            -c ${{ steps.get-shas.outputs.current_sha }} ${{ steps.get-shas.outputs.base_sha }} \
+            -c ${{ steps.get-runs.outputs.latest_sha }} ${{ steps.get-runs.outputs.previous_sha }} \
             --working-directory $(pwd)/../tmp/benchmark \
             -y -v \
             --duration 1s
