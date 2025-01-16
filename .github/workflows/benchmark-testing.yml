@@ -78,8 +78,6 @@ jobs:
           echo "previous_sha=$PREVIOUS_SHA" >> $GITHUB_OUTPUT
         env:
           GH_TOKEN: ${{ github.token }}
-        env:
-          GH_TOKEN: ${{ github.token }}
 
       # Download latest version binary
       - name: Download Latest Version Binary
