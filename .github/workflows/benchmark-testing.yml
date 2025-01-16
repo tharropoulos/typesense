@@ -18,11 +18,27 @@ jobs:
       - name: Get run IDs and SHAs
         id: get-runs
         run: |
-          # Get the last two successful runs from main branch
+          # First, list all workflow runs to debug
+          echo "Fetching workflow runs..."
+          ALL_RUNS=$(gh api -H "Accept: application/vnd.github+json" \
+            /repos/${{ github.repository }}/actions/workflows/tests.yml/runs)
+          echo "All runs:"
+          echo "$ALL_RUNS" | jq '.'
+
+          # Now get the filtered runs with more verbose output
+          echo "Fetching successful main branch runs..."
           RUNS_INFO=$(gh api -H "Accept: application/vnd.github+json" \
             /repos/${{ github.repository }}/actions/workflows/tests.yml/runs \
-            -q '.workflow_runs[] | select(.conclusion == "success" and .head_branch == "main") | {id: .id, sha: .head_sha}' \
-            --paginate | head -n 2)
+            -q '.workflow_runs[] | select(.conclusion == "success" and .head_branch == "main") | {id: .id, sha: .head_sha, branch: .head_branch, conclusion: .conclusion}' \
+            --paginate)
+          
+          echo "Found runs info:"
+          echo "$RUNS_INFO"
+          
+          if [ -z "$RUNS_INFO" ]; then
+            echo "No successful runs found from main branch"
+            exit 1
+          fi
           
           # Extract the latest run info
           LATEST_RUN=$(echo "$RUNS_INFO" | head -n 1)
@@ -33,6 +49,11 @@ jobs:
           PREVIOUS_RUN=$(echo "$RUNS_INFO" | tail -n 1)
           PREVIOUS_ID=$(echo "$PREVIOUS_RUN" | jq -r '.id')
           PREVIOUS_SHA=$(echo "$PREVIOUS_RUN" | jq -r '.sha')
+          
+          echo "Latest run ID: $LATEST_ID"
+          echo "Latest SHA: $LATEST_SHA"
+          echo "Previous run ID: $PREVIOUS_ID"
+          echo "Previous SHA: $PREVIOUS_SHA"
           
           # Set outputs
           echo "latest_run=$LATEST_ID" >> $GITHUB_OUTPUT
