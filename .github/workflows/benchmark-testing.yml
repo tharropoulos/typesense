@@ -1,10 +1,6 @@
 name: Benchmark Testing
 
-on:
-  workflow_dispatch:
-  pull_request:
-    types: [opened, synchronize]
-  push:
+on: workflow_dispatch  
 
 # Cancel previous running if a new push is made
 concurrency:
