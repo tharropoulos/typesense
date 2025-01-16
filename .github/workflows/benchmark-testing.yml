@@ -1,6 +1,8 @@
 name: Benchmark Testing
 
-on: workflow_dispatch  
+on:
+  schedule:
+    - cron: '0 */12 * * *'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
