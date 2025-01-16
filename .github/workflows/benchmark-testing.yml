@@ -21,6 +21,7 @@ jobs:
           REPO_INFO=$(gh api /repos/${{ github.repository }})
           IS_FORK=$(echo "$REPO_INFO" | jq -r '.fork')
           PARENT_REPO=$(echo "$REPO_INFO" | jq -r '.parent.full_name // empty')
+          DEFAULT_BRANCH=$(echo "$REPO_INFO" | jq -r '.default_branch')
           
           echo "Is fork: $IS_FORK"
           if [ "$IS_FORK" = "true" ]; then
@@ -31,7 +32,7 @@ jobs:
             echo "This is the main repo"
             # For main repo, get successful runs from main branch
             REPO_TO_CHECK="${{ github.repository }}"
-            BRANCH_FILTER='and .head_branch == "main"'
+            BRANCH_FILTER="and .head_branch == \"$DEFAULT_BRANCH\""
           fi
 
           echo "Fetching workflow runs from $REPO_TO_CHECK..."
@@ -43,7 +44,7 @@ jobs:
           else
             RUNS_INFO=$(gh api -H "Accept: application/vnd.github+json" \
               /repos/$REPO_TO_CHECK/actions/workflows/tests.yml/runs \
-              -q ".workflow_runs[] | select(.conclusion == \"success\" and .head_branch == \"main\") | {id: .id, sha: .head_sha, branch: .head_branch, conclusion: .conclusion}" \
+              -q ".workflow_runs[] | select(.conclusion == \"success\" and .head_branch == \"$DEFAULT_BRANCH\") | {id: .id, sha: .head_sha, branch: .head_branch, conclusion: .conclusion}" \
               --paginate | head -n 2)
           fi
           
@@ -75,6 +76,8 @@ jobs:
           echo "previous_run=$PREVIOUS_ID" >> $GITHUB_OUTPUT
           echo "latest_sha=$LATEST_SHA" >> $GITHUB_OUTPUT
           echo "previous_sha=$PREVIOUS_SHA" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ github.token }}
         env:
           GH_TOKEN: ${{ github.token }}
 
