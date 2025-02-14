@@ -1,0 +1,40 @@
+{
+  "failureThresholds": {
+    "filter_complex": {
+      "100vu": 1,
+      "50vu": 1
+    },
+    "filter_simple": {
+      "100vu": 1,
+      "50vu": 1
+    },
+    "group": {
+      "100vu": 1,
+      "50vu": 1
+    },
+    "just_q": {
+      "100vu": 1,
+      "50vu": 1
+    },
+    "q_star": {
+      "100vu": 1,
+      "50vu": 1
+    },
+    "sort_eval_condition": {
+      "100vu": 1,
+      "50vu": 1
+    },
+    "sort_eval_score": {
+      "100vu": 1,
+      "50vu": 1
+    },
+    "sort_simple": {
+      "100vu": 1,
+      "50vu": 1
+    },
+    "facet": {
+      "100vu": 1,
+      "50vu": 1
+    }
+  }
+}
