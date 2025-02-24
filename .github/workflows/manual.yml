@@ -1,0 +1,45 @@
+name: integration-tests-only
+
+on: workflow_dispatch  # Manual trigger
+
+jobs:
+  integration-tests:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, macos-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download Typesense Binary
+        uses: actions/download-artifact@v4
+        with:
+          name: typesense-server
+          path: ./typesense-server-binary
+
+      - name: Make binary executable
+        run: chmod +x ./typesense-server-binary/typesense-server
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: benchmark
+        run: |
+          npm install -g pnpm
+          pnpm install
+
+      - name: Build CLI
+        working-directory: benchmark
+        run: pnpm build
+
+      - name: Run Integration Tests
+        working-directory: benchmark
+        run: |
+          ./dist/index.js test \
+            --binary $(pwd)/../typesense-server-binary/typesense-server \
+            --working-directory $(pwd)/../tmp/test -y -v
