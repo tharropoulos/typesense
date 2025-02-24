@@ -12,19 +12,52 @@ import { extract } from "tar-stream";
 
 import { toErrorWithMessage } from "@/utils/error";
 
-type PlatformFlag = "linux/amd64" | "linux/arm64" | "darwin/amd64" | "windows/amd64";
+export type PlatformFlag = {
+  platform: NodeJS.Platform;
+  arch: NodeJS.Architecture | "amd64";
+};
 
 export function getPlatform(): PlatformFlag {
-  const plat = process.arch;
+  const platform = process.platform;
+  const arch = process.arch;
 
-  switch (plat) {
-    case "x64":
-      return "linux/amd64";
-    case "arm":
-    case "arm64":
-      return "linux/arm64";
+  switch (platform) {
+    case "darwin":
+      return arch === "arm64" ?
+          {
+            platform: "darwin",
+            arch: "arm64",
+          }
+        : {
+            platform: "darwin",
+            arch: "x64",
+          };
+
+    case "linux":
+      switch (arch) {
+        case "x64":
+          return {
+            platform: "linux",
+            arch: "amd64",
+          };
+        case "arm":
+        case "arm64":
+          return {
+            platform: "linux",
+            arch: "arm64",
+          };
+        default:
+          return {
+            platform: "linux",
+            arch: "amd64",
+          };
+      }
+
     default:
-      return "linux/amd64";
+      return {
+        platform: "linux",
+        arch: "amd64",
+      };
   }
 }
 

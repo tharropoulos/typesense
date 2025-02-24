@@ -1,10 +1,12 @@
 import { writeFile } from "fs/promises";
 import { networkInterfaces } from "os";
 import path from "path";
+import type { PlatformFlag } from "@/services/fs";
 import type { TypesenseProcessController } from "@/services/typesense-process";
 import type { ErrorWithMessage } from "@/utils/error";
 import type { Result } from "neverthrow";
 import type { Ora } from "ora";
+import type { NetworkInterfaceInfo } from "os";
 import type { CollectionCreateSchema } from "typesense/lib/Typesense/Collections";
 import type { ConversationModelSchema } from "typesense/lib/Typesense/ConversationModel";
 import type { SearchParams } from "typesense/lib/Typesense/Documents";
@@ -92,19 +94,38 @@ class IntegrationTests {
     });
   }
 
+  private isMatchingIpAddress(info: NetworkInterfaceInfo, platform: PlatformFlag): boolean {
+    if (info.family !== "IPv4") return false;
+
+    switch (platform.platform) {
+      case "darwin":
+        return info.address.startsWith("192.168.");
+      case "win32":
+        return info.address.startsWith("10.0.");
+      case "linux":
+      default:
+        return info.address.startsWith("10.1.0.");
+    }
+  }
+
   private findDefaultNetworkAddress(): string | null {
     const interfaces = networkInterfaces();
-
     if (!this.isInCi) {
       return DEFAULT_IP_ADDRESS;
     }
 
+    const currentPlatform: PlatformFlag = {
+      platform: process.platform,
+      arch: process.arch === "x64" ? "amd64" : process.arch,
+    };
+
     return (
       Object.values(interfaces)
         .flatMap((interfaceInfo) => interfaceInfo ?? [])
-        .find((info) => info.family === "IPv4" && info.address.startsWith("10.1.0."))?.address ?? null
+        .find((info) => this.isMatchingIpAddress(info, currentPlatform))?.address ?? null
     );
   }
+
   private mapNodesToDirectories(dataDirs: [string, string, string]): Result<NodeConfig[], ErrorWithMessage> {
     const nodes: NodeConfig[] = [];
 
