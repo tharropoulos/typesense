@@ -1,42 +1,89 @@
 name: integration-tests-only
-
 on: workflow_dispatch  # Manual trigger
-
 jobs:
   integration-tests:
-    runs-on: ubuntu-22.04
-
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, macos-latest]
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Download Latest Typesense Binary
+        uses: actions/checkout@v4
+      
+      - name: Install jq and GitHub CLI
+        run: |
+          if [ "$RUNNER_OS" == "Linux" ]; then
+            sudo apt-get update
+            sudo apt-get install -y jq
+          elif [ "$RUNNER_OS" == "macOS" ]; then
+            brew install jq
+          fi
+          # GitHub CLI should be pre-installed on GitHub runners
+      
+      - name: Get latest successful run ID
+        id: get-run
+        run: |
+          # Check if we're on a fork
+          REPO_INFO=$(gh api /repos/${{ github.repository }})
+          IS_FORK=$(echo "$REPO_INFO" | jq -r '.fork')
+          DEFAULT_BRANCH=$(echo "$REPO_INFO" | jq -r '.default_branch')
+          
+          echo "Fetching workflow runs from ${{ github.repository }}..."
+          
+          # Get successful runs from the tests workflow
+          RUNS_INFO=$(gh api -H "Accept: application/vnd.github+json" \
+            /repos/${{ github.repository }}/actions/workflows/tests.yml/runs \
+            -q '.workflow_runs[] | select(.conclusion == "success") | {id: .id, sha: .head_sha, branch: .head_branch, conclusion: .conclusion}' \
+            --paginate | head -n 1)
+          
+          echo "Found run info: $RUNS_INFO"
+          
+          if [ -z "$RUNS_INFO" ]; then
+            echo "No successful runs found"
+            exit 1
+          fi
+          
+          # Extract the run ID
+          RUN_ID=$(echo "$RUNS_INFO" | jq -r '.id')
+          echo "Latest successful run ID: $RUN_ID"
+          
+          # Set output
+          echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ github.token }}
+          
+      - name: Download Typesense Binary
         uses: dawidd6/action-download-artifact@v2
         with:
           workflow: tests.yml
           name: typesense-server
           path: ./typesense-server-binary
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          run_id: ${{ steps.get-run.outputs.run_id }}
           workflow_conclusion: success
-          search_artifacts: true
-          skip_unpack: false
-
+          
       - name: Make binary executable
         run: chmod +x ./typesense-server-binary/typesense-server
-
+        
       - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
           node-version: '20'
-
-      - name: Install and Run Tests
+          
+      - name: Install dependencies
         working-directory: benchmark
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           npm install -g pnpm
           pnpm install
-          pnpm build
+          
+      - name: Build CLI
+        working-directory: benchmark
+        run: pnpm build
+        
+      - name: Run Integration Tests
+        working-directory: benchmark
+        run: |
           ./dist/index.js test \
             --binary $(pwd)/../typesense-server-binary/typesense-server \
             --working-directory $(pwd)/../tmp/test -y -v
