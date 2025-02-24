@@ -56,14 +56,59 @@ jobs:
         uses: dawidd6/action-download-artifact@v2
         with:
           workflow: tests.yml
-          name: typesense-server
-          path: ./typesense-server-binary
-          run_id: ${{ steps.get-run.outputs.run_id }}
+          name: typesense-server-Linux
+          path: ./current-binary
+          run_id: ${{ steps.get-runs.outputs.latest_run }}
           workflow_conclusion: success
-          
-      - name: Make binary executable
-        run: chmod +x ./typesense-server-binary/typesense-server
-        
+
+      # Download previous version binary
+      - name: Download Previous Version Binary
+        uses: dawidd6/action-download-artifact@v2
+        with:
+          workflow: tests.yml
+          name: typesense-server-Linux
+          path: ./base-binary
+          run_id: ${{ steps.get-runs.outputs.previous_run }}
+          workflow_conclusion: success
+
+      # Make binaries executable
+      - name: Make binaries executable
+        run: |
+          chmod +x ./current-binary/typesense-server-Linux
+          chmod +x ./base-binary/typesense-server-Linux
+
+      # Download previous benchmark data
+      - name: Download previous benchmark data
+        uses: dawidd6/action-download-artifact@v2
+        with:
+          name: benchmark-data
+          workflow: benchmark-testing.yml
+          path: ./benchmark/influxdb-data
+          search_artifacts: true
+          workflow_conclusion: ""
+        continue-on-error: true
+
+      # Prepare InfluxDB
+      - name: Prepare data directory
+        working-directory: benchmark
+        run: |
+          mkdir -p ./influxdb-data
+          sudo chown -R 999:999 ./influxdb-data
+
+      - name: Start containers
+        working-directory: benchmark
+        run: docker compose up -d
+
+      - name: Wait for InfluxDB to be ready
+        working-directory: benchmark
+        run: |
+          timeout 30s bash -c '
+          until curl -s http://localhost:8086/ping; do
+            echo "Waiting for InfluxDB..."
+            sleep 1
+          done
+          '
+
       - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
