@@ -15,3 +15,5 @@ run --define=BRPC_WITH_GLOG=true
 build --enable_platform_specific_config
 
 build:linux --action_env=BAZEL_LINKLIBS="-l%:libstdc++.a -l%:libgcc.a"
+build:macos --cxxopt="-Wno-error=unused-but-set-variable"
+build:macos --cxxopt="-Wno-unused-but-set-variable"
