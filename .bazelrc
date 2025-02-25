@@ -16,5 +16,6 @@ build --enable_platform_specific_config
 
 build:linux --action_env=BAZEL_LINKLIBS="-l%:libstdc++.a -l%:libgcc.a"
 
-build:darwin --cxxopt="-Wno-error=unused-but-set-variable"
-build:darwin --cxxopt="-Wno-unused-but-set-variable"
+build:darwin --action_env=CXXFLAGS="-Wno-error=unused-but-set-variable -Wno-unused-but-set-variable"
+build:darwin --host_cxxopt="-Wno-error=unused-but-set-variable"
+build:darwin --host_cxxopt="-Wno-unused-but-set-variable"
