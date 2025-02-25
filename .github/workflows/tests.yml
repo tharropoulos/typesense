@@ -47,32 +47,6 @@ jobs:
       - name: Set up Bazel
         uses: bazelbuild/setup-bazelisk@v2
 
-     # Add verification steps for macOS config
-      - name: Verify Bazel configuration (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          echo "=== Bazel Version ==="
-          bazel --version
-          
-          echo "=== Configuration Files Being Read ==="
-          bazel build --announce_rc
-          
-          echo "=== Bazel Environment Info ==="
-          bazel info
-          
-          echo "=== Checking if darwin/macOS flags will be applied ==="
-          # Get a sample of compiler flags without building
-          bazel build --nobuild --aspects=@bazel_tools//tools/cpp:toolchain_utils.bzl%cc_flags_supplier_aspect --output_groups=cc_flags //... 2>&1 | grep -i "wno"
-          
-          # Create a quick test file to verify flags
-          echo 'int main() { int unused = 0; return 0; }' > test_unused_var.cc
-          echo 'cc_binary(name = "test_unused_var", srcs = ["test_unused_var.cc"])' > BUILD.unused
-          
-          # Try to build it (should succeed if flags are applied correctly)
-          bazel build //test_unused_var
-          
-          echo "Verification complete"
-
       - name: Download bazel cache
         uses: jasonbosco/action-download-artifact@709b71d3729e8980f52a5a2a9ec04261060945c1
         with:
@@ -105,7 +79,12 @@ jobs:
           bazel build @com_google_protobuf//:protoc
 
       - name: Build Typesense
+        if: runner.os == 'Linux'
         run: bazel build //:typesense-server
+
+      - name: Build Typesense (macOS)
+        if: runner.os == 'macOS'
+        run: bazel build --config=darwin //:typesense-server
 
       - name: Run tests
         run: bazel test --cache_test_results=no --test_output=all //:typesense-test
