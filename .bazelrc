@@ -17,10 +17,15 @@ build --enable_platform_specific_config
 build:linux --action_env=BAZEL_LINKLIBS="-l%:libstdc++.a -l%:libgcc.a"
 
 # macOS-specific settings for Clang
-build:darwin --action_env=CMAKE_OPTIONS="-DCMAKE_CXX_FLAGS=-Wno-error=unused-but-set-variable -Wno-unused-but-set-variable -Wno-error=uninitialized"
-build:darwin --copt="-Wno-error=unused-but-set-variable"
-build:darwin --copt="-Wno-unused-but-set-variable"
-build:darwin --host_copt="-Wno-error=unused-but-set-variable"
-build:darwin --host_copt="-Wno-unused-but-set-variable"
-build:darwin --@rules_foreign_cc//foreign_cc/configure:cmake_cxx_flags="-Wno-error"
-build:darwin --@rocksdb//:cmake_cxx_flags="-Wno-error -Wno-error=unused-but-set-variable -Wno-unused-but-set-variable"
+build:darwin --cxxopt="-Wno-error"
+build:darwin --host_cxxopt="-Wno-error"
+build:darwin --conlyopt="-Wno-error"
+build:darwin --host_conlyopt="-Wno-error"
+
+# Specific flag to disable unused-but-set-variable warnings
+build:darwin --cxxopt="-Wno-unused-but-set-variable"
+build:darwin --host_cxxopt="-Wno-unused-but-set-variable" 
+
+# Set action environment variables for cmake tools
+build:darwin --action_env=CXXFLAGS="-Wno-error -Wno-unused-but-set-variable"
+build:darwin --action_env=CFLAGS="-Wno-error"
