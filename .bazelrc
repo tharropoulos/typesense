@@ -16,6 +16,10 @@ build --enable_platform_specific_config
 
 build:linux --action_env=BAZEL_LINKLIBS="-l%:libstdc++.a -l%:libgcc.a"
 
+# macOS-specific settings for Clang
+build:darwin --copt="-Wno-error=unused-but-set-variable"
+build:darwin --copt="-Wno-unused-but-set-variable"
+build:darwin --host_copt="-Wno-error=unused-but-set-variable"
+build:darwin --host_copt="-Wno-unused-but-set-variable"
 build:darwin --action_env=CXXFLAGS="-Wno-error=unused-but-set-variable -Wno-unused-but-set-variable"
-build:darwin --host_cxxopt="-Wno-error=unused-but-set-variable"
-build:darwin --host_cxxopt="-Wno-unused-but-set-variable"
+build:darwin --action_env=CMAKE_CXX_FLAGS="-Wno-error=unused-but-set-variable -Wno-unused-but-set-variable"
