@@ -2499,3 +2499,407 @@ TEST_F(CoreAPIUtilsTest, CollectionSchemaResponseWithStoreValue) {
     expected_json["created_at"] = res_json["created_at"];
     ASSERT_EQ(expected_json, res_json);
 }
+
+TEST_F(CoreAPIUtilsTest, DelRemoveDocumentsWithReturnDoc) {
+    Collection *coll1;
+
+    std::vector<field> fields = {field("title", field_types::STRING, false),
+                                 field("points", field_types::INT32, false),};
+
+    coll1 = collectionManager.get_collection("coll1").get();
+    if(coll1 == nullptr) {
+        coll1 = collectionManager.create_collection("coll1", 2, fields, "points").get();
+    }
+
+    for(size_t i=0; i<5; i++) {
+        nlohmann::json doc;
+
+        doc["id"] = std::to_string(i);
+        doc["title"] = "Title " + std::to_string(i);
+        doc["points"] = i;
+
+        coll1->add(doc.dump());
+    }
+
+    // Test document return
+    std::shared_ptr<http_req> req = std::make_shared<http_req>();
+    std::shared_ptr<http_res> res = std::make_shared<http_res>(nullptr);
+
+    req->params["collection"] = "coll1";
+    req->params["filter_by"] = "points:1";
+    req->params["return_doc"] = "true";
+    
+    ASSERT_TRUE(del_remove_documents(req, res));
+    auto response = nlohmann::json::parse(res->body);
+    ASSERT_EQ(1, response["num_deleted"]);
+    ASSERT_TRUE(response.contains("documents"));
+    ASSERT_EQ(1, response["documents"].size());
+    ASSERT_EQ("1", response["documents"][0]["id"]);
+    ASSERT_EQ("Title 1", response["documents"][0]["title"]);
+    ASSERT_EQ(1, response["documents"][0]["points"]);
+    ASSERT_FALSE(response.contains("ids"));
+
+    // Test multiple documents
+    req = std::make_shared<http_req>();
+    res = std::make_shared<http_res>(nullptr);
+
+    req->params["collection"] = "coll1";
+    req->params["filter_by"] = "points:[2, 3]";
+    req->params["return_doc"] = "true";
+    
+    ASSERT_TRUE(del_remove_documents(req, res));
+    response = nlohmann::json::parse(res->body);
+    ASSERT_EQ(2, response["num_deleted"]);
+    ASSERT_TRUE(response.contains("documents"));
+    ASSERT_EQ(2, response["documents"].size());
+    ASSERT_FALSE(response.contains("ids"));
+
+    // Sort to ensure consistent test results
+    std::vector<std::string> doc_ids;
+    for (const auto& doc : response["documents"]) {
+        doc_ids.push_back(doc["id"]);
+    }
+    std::sort(doc_ids.begin(), doc_ids.end());
+    ASSERT_EQ("2", doc_ids[0]);
+    ASSERT_EQ("3", doc_ids[1]);
+
+    collectionManager.drop_collection("coll1");
+}
+
+TEST_F(CoreAPIUtilsTest, DelRemoveDocumentsWithReturnId) {
+    Collection *coll1;
+
+    std::vector<field> fields = {field("title", field_types::STRING, false),
+                                 field("points", field_types::INT32, false),};
+
+    coll1 = collectionManager.get_collection("coll1").get();
+    if(coll1 == nullptr) {
+        coll1 = collectionManager.create_collection("coll1", 2, fields, "points").get();
+    }
+
+    for(size_t i=0; i<5; i++) {
+        nlohmann::json doc;
+
+        doc["id"] = std::to_string(i);
+        doc["title"] = "Title " + std::to_string(i);
+        doc["points"] = i;
+
+        coll1->add(doc.dump());
+    }
+
+    // Test ID return
+    std::shared_ptr<http_req> req = std::make_shared<http_req>();
+    std::shared_ptr<http_res> res = std::make_shared<http_res>(nullptr);
+
+    req->params["collection"] = "coll1";
+    req->params["filter_by"] = "points:0";
+    req->params["return_id"] = "true";
+    
+    ASSERT_TRUE(del_remove_documents(req, res));
+    auto response = nlohmann::json::parse(res->body);
+    ASSERT_EQ(1, response["num_deleted"]);
+    ASSERT_TRUE(response.contains("ids"));
+    ASSERT_EQ(1, response["ids"].size());
+    ASSERT_EQ("0", response["ids"][0]);
+    ASSERT_FALSE(response.contains("documents"));
+
+    // Test multiple IDs
+    req = std::make_shared<http_req>();
+    res = std::make_shared<http_res>(nullptr);
+
+    req->params["collection"] = "coll1";
+    req->params["filter_by"] = "points:[2, 4]";
+    req->params["return_id"] = "true";
+    
+    ASSERT_TRUE(del_remove_documents(req, res));
+    response = nlohmann::json::parse(res->body);
+    ASSERT_EQ(2, response["num_deleted"]);
+    ASSERT_TRUE(response.contains("ids"));
+    ASSERT_EQ(2, response["ids"].size());
+    ASSERT_FALSE(response.contains("documents"));
+
+    // Sort to ensure consistent test results
+    std::vector<std::string> ids;
+    for (const auto& id : response["ids"]) {
+        ids.push_back(id);
+    }
+    std::sort(ids.begin(), ids.end());
+    ASSERT_EQ("2", ids[0]);
+    ASSERT_EQ("4", ids[1]);
+
+    collectionManager.drop_collection("coll1");
+}
+
+TEST_F(CoreAPIUtilsTest, DelRemoveDocumentsWithReturnDocAndId) {
+    Collection *coll1;
+
+    std::vector<field> fields = {field("title", field_types::STRING, false),
+                                 field("points", field_types::INT32, false),};
+
+    coll1 = collectionManager.get_collection("coll1").get();
+    if(coll1 == nullptr) {
+        coll1 = collectionManager.create_collection("coll1", 2, fields, "points").get();
+    }
+
+    for(size_t i=0; i<10; i++) {
+        nlohmann::json doc;
+
+        doc["id"] = std::to_string(i);
+        doc["title"] = "Title " + std::to_string(i);
+        doc["points"] = i;
+
+        coll1->add(doc.dump());
+    }
+
+    // Test returning both document and ID
+    std::shared_ptr<http_req> req = std::make_shared<http_req>();
+    std::shared_ptr<http_res> res = std::make_shared<http_res>(nullptr);
+
+    req->params["collection"] = "coll1";
+    req->params["filter_by"] = "points:3";
+    req->params["return_doc"] = "true";
+    req->params["return_id"] = "true";
+    
+    ASSERT_TRUE(del_remove_documents(req, res));
+    auto response = nlohmann::json::parse(res->body);
+    ASSERT_EQ(1, response["num_deleted"]);
+    ASSERT_TRUE(response.contains("documents"));
+    ASSERT_TRUE(response.contains("ids"));
+    ASSERT_EQ(1, response["documents"].size());
+    ASSERT_EQ(1, response["ids"].size());
+    ASSERT_EQ("3", response["documents"][0]["id"]);
+    ASSERT_EQ("Title 3", response["documents"][0]["title"]);
+    ASSERT_EQ(3, response["documents"][0]["points"]);
+    ASSERT_EQ("3", response["ids"][0]);
+
+    // Test multiple documents and IDs
+    req = std::make_shared<http_req>();
+    res = std::make_shared<http_res>(nullptr);
+
+    req->params["collection"] = "coll1";
+    req->params["filter_by"] = "points:[4, 5]";
+    req->params["return_doc"] = "true";
+    req->params["return_id"] = "true";
+    
+    ASSERT_TRUE(del_remove_documents(req, res));
+    response = nlohmann::json::parse(res->body);
+    ASSERT_EQ(2, response["num_deleted"]);
+    ASSERT_TRUE(response.contains("documents"));
+    ASSERT_TRUE(response.contains("ids"));
+    ASSERT_EQ(2, response["documents"].size());
+    ASSERT_EQ(2, response["ids"].size());
+
+    // Sort to ensure consistent test results
+    std::vector<std::string> doc_ids;
+    for (const auto& doc : response["documents"]) {
+        doc_ids.push_back(doc["id"]);
+    }
+    std::sort(doc_ids.begin(), doc_ids.end());
+    ASSERT_EQ("4", doc_ids[0]);
+    ASSERT_EQ("5", doc_ids[1]);
+
+    std::vector<std::string> ids;
+    for (const auto& id : response["ids"]) {
+        ids.push_back(id);
+    }
+    std::sort(ids.begin(), ids.end());
+    ASSERT_EQ("4", ids[0]);
+    ASSERT_EQ("5", ids[1]);
+
+    // Test with no matches
+    req = std::make_shared<http_req>();
+    res = std::make_shared<http_res>(nullptr);
+
+    req->params["collection"] = "coll1";
+    req->params["filter_by"] = "points:100";  // Non-existent document
+    req->params["return_doc"] = "true";
+    req->params["return_id"] = "true";
+    
+    ASSERT_TRUE(del_remove_documents(req, res));
+    response = nlohmann::json::parse(res->body);
+    ASSERT_EQ(0, response["num_deleted"]);
+    ASSERT_FALSE(response.contains("documents"));
+    ASSERT_FALSE(response.contains("ids"));
+
+    collectionManager.drop_collection("coll1");
+}
+
+TEST_F(CoreAPIUtilsTest, StatefulRemoveDocsWithReturn) {
+    Collection *coll1;
+
+    std::vector<field> fields = {field("title", field_types::STRING, false),
+                                 field("points", field_types::INT32, false),};
+
+    coll1 = collectionManager.get_collection("coll1").get();
+    if(coll1 == nullptr) {
+        coll1 = collectionManager.create_collection("coll1", 2, fields, "points").get();
+    }
+
+    for(size_t i=0; i<10; i++) {
+        nlohmann::json doc;
+
+        doc["id"] = std::to_string(i);
+        doc["title"] = "Title " + std::to_string(i);
+        doc["points"] = i;
+
+        coll1->add(doc.dump());
+    }
+
+    bool done;
+    deletion_state_t deletion_state;
+    deletion_state.collection = coll1;
+    deletion_state.num_removed = 0;
+
+    // Test 1: Return document test
+    deletion_state.return_doc = true;
+    deletion_state.return_id = false;
+    
+    filter_result_t filter_results;
+    coll1->get_filter_ids("points: 5", filter_results);
+    deletion_state.index_ids.emplace_back(filter_results.count, filter_results.docs);
+    filter_results.docs = nullptr;
+    for(size_t i=0; i<deletion_state.index_ids.size(); i++) {
+        deletion_state.offsets.push_back(0);
+    }
+
+    stateful_remove_docs(&deletion_state, 5, done);
+    ASSERT_EQ(1, deletion_state.num_removed);
+    ASSERT_TRUE(done);
+    ASSERT_EQ(1, deletion_state.removed_docs.size());
+    ASSERT_EQ("5", deletion_state.removed_docs[0]["id"]);
+    ASSERT_EQ("Title 5", deletion_state.removed_docs[0]["title"]);
+    ASSERT_EQ(5, deletion_state.removed_docs[0]["points"]);
+    ASSERT_EQ(0, deletion_state.removed_ids.size());
+
+    // Test 2: Return ID test
+    for(auto& kv: deletion_state.index_ids) {
+        delete [] kv.second;
+    }
+    deletion_state.index_ids.clear();
+    deletion_state.offsets.clear();
+    deletion_state.num_removed = 0;
+    deletion_state.removed_docs.clear();
+    deletion_state.removed_ids.clear();
+    deletion_state.return_doc = false;
+    deletion_state.return_id = true;
+
+    coll1->get_filter_ids("points: 6", filter_results);
+    deletion_state.index_ids.emplace_back(filter_results.count, filter_results.docs);
+    filter_results.docs = nullptr;
+    for(size_t i=0; i<deletion_state.index_ids.size(); i++) {
+        deletion_state.offsets.push_back(0);
+    }
+
+    stateful_remove_docs(&deletion_state, 5, done);
+    ASSERT_EQ(1, deletion_state.num_removed);
+    ASSERT_TRUE(done);
+    ASSERT_EQ(0, deletion_state.removed_docs.size());
+    ASSERT_EQ(1, deletion_state.removed_ids.size());
+    ASSERT_EQ("6", deletion_state.removed_ids[0]);
+
+    // Test 3: Return both document and ID
+    for(auto& kv: deletion_state.index_ids) {
+        delete [] kv.second;
+    }
+    deletion_state.index_ids.clear();
+    deletion_state.offsets.clear();
+    deletion_state.num_removed = 0;
+    deletion_state.removed_docs.clear();
+    deletion_state.removed_ids.clear();
+    deletion_state.return_doc = true;
+    deletion_state.return_id = true;
+
+    coll1->get_filter_ids("points: [7, 8]", filter_results);
+    deletion_state.index_ids.emplace_back(filter_results.count, filter_results.docs);
+    filter_results.docs = nullptr;
+    for(size_t i=0; i<deletion_state.index_ids.size(); i++) {
+        deletion_state.offsets.push_back(0);
+    }
+
+    stateful_remove_docs(&deletion_state, 5, done);
+    ASSERT_EQ(2, deletion_state.num_removed);
+    ASSERT_TRUE(done);
+    ASSERT_EQ(2, deletion_state.removed_docs.size());
+    ASSERT_EQ(2, deletion_state.removed_ids.size());
+    
+    // Check first document (ordering might vary)
+    bool found_seven = false;
+    bool found_eight = false;
+    for(const auto& doc : deletion_state.removed_docs) {
+        if(doc["id"] == "7") {
+            ASSERT_EQ("Title 7", doc["title"]);
+            ASSERT_EQ(7, doc["points"]);
+            found_seven = true;
+        } else if(doc["id"] == "8") {
+            ASSERT_EQ("Title 8", doc["title"]);
+            ASSERT_EQ(8, doc["points"]);
+            found_eight = true;
+        }
+    }
+    ASSERT_TRUE(found_seven);
+    ASSERT_TRUE(found_eight);
+    
+    // Check IDs
+    bool found_id_seven = false;
+    bool found_id_eight = false;
+    for(const auto& id : deletion_state.removed_ids) {
+        if(id == "7") {
+            found_id_seven = true;
+        } else if(id == "8") {
+            found_id_eight = true;
+        }
+    }
+    ASSERT_TRUE(found_id_seven);
+    ASSERT_TRUE(found_id_eight);
+
+    // Test 4: Non-existent document (should increment num_removed but not add to removed_docs/ids)
+    for(auto& kv: deletion_state.index_ids) {
+        delete [] kv.second;
+    }
+    deletion_state.index_ids.clear();
+    deletion_state.offsets.clear();
+    deletion_state.num_removed = 0;
+    deletion_state.removed_docs.clear();
+    deletion_state.removed_ids.clear();
+    deletion_state.return_doc = true;
+    deletion_state.return_id = true;
+
+    // First delete document 9
+    coll1->get_filter_ids("points: 9", filter_results);
+    deletion_state.index_ids.emplace_back(filter_results.count, filter_results.docs);
+    filter_results.docs = nullptr;
+    for(size_t i=0; i<deletion_state.index_ids.size(); i++) {
+        deletion_state.offsets.push_back(0);
+    }
+
+    stateful_remove_docs(&deletion_state, 5, done);
+    ASSERT_EQ(1, deletion_state.num_removed);
+    ASSERT_TRUE(done);
+    ASSERT_EQ(1, deletion_state.removed_docs.size());
+    ASSERT_EQ(1, deletion_state.removed_ids.size());
+
+    // Now try to delete it again
+    for(auto& kv: deletion_state.index_ids) {
+        delete [] kv.second;
+    }
+    deletion_state.index_ids.clear();
+    deletion_state.offsets.clear();
+    deletion_state.num_removed = 0;
+    deletion_state.removed_docs.clear();
+    deletion_state.removed_ids.clear();
+
+    coll1->get_filter_ids("points: 9", filter_results);
+    deletion_state.index_ids.emplace_back(filter_results.count, filter_results.docs);
+    filter_results.docs = nullptr;
+    for(size_t i=0; i<deletion_state.index_ids.size(); i++) {
+        deletion_state.offsets.push_back(0);
+    }
+
+    stateful_remove_docs(&deletion_state, 5, done);
+    ASSERT_EQ(0, deletion_state.num_removed);
+    ASSERT_TRUE(done);
+    ASSERT_EQ(0, deletion_state.removed_docs.size());
+    ASSERT_EQ(0, deletion_state.removed_ids.size());
+
+    collectionManager.drop_collection("coll1");
+}
