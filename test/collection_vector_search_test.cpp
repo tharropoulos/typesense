@@ -5205,6 +5205,66 @@ TEST_F(CollectionVectorTest, HybridSearchWithFilteringAndFlatSearchCutoff) {
     ASSERT_EQ(4, res["hits"].size());
 }
 
+TEST_F(CollectionVectorTest, MultipleSortFieldsWithoutTextMatch) {
+    nlohmann::json schema = R"({
+        "name": "test",
+        "fields": [
+            {
+                "name": "searchText0",
+                "type": "string"
+            },
+            {
+                "name": "searchText1",
+                "type": "string"
+            },
+            {
+                "name": "searchText2",
+                "type": "string"
+            },
+            {
+                "name": "genericFlField1",
+                "type": "float",
+                "sort": true
+            },
+            {
+                "name": "genericFlField2",
+                "type": "float",
+                "sort": true
+            }
+        ]
+    })"_json;
+
+    auto collection_create_op = collectionManager.create_collection(schema);
+    ASSERT_TRUE(collection_create_op.ok());
+
+    auto coll = collection_create_op.get();
+
+    // Add a test document
+    auto add_op = coll->add(R"({
+        "searchText0": "test text",
+        "searchText1": "more text",
+        "searchText2": "even more text",
+        "genericFlField1": 1.5,
+        "genericFlField2": 2.5,
+        "id": "0"
+    })"_json.dump());
+
+    ASSERT_TRUE(add_op.ok());
+
+    // Search with multiple sort fields
+    auto res = coll->search("test", {"searchText0", "searchText1", "searchText2"}, "", 
+                           {"genericFlField1:desc", "genericFlField2:desc"}, {}, {2}, 10, 1,
+                           FREQUENCY, {true}, Index::DROP_TOKENS_THRESHOLD, 
+                           spp::sparse_hash_set<std::string>(), {}, 10, "", 30, 4, "", 40,
+                           {}, {}, {}, 0, "<mark>", "</mark>", {}, 1000, true, false, true, "", false,
+                           6000*1000, 4, 7, fallback, 4, {off}, INT16_MAX, INT16_MAX, 2, 2, false, "").get();
+
+    // Verify that text match was not added by checking the sort fields in the response
+    ASSERT_EQ(2, res["hits"][0]["sort"].size());
+    ASSERT_EQ("1.5", res["hits"][0]["sort"][0]);
+    ASSERT_EQ("2.5", res["hits"][0]["sort"][1]);
+}
+
 TEST_F(CollectionVectorTest, HybridSearchAuxScoreTest) {
     nlohmann::json schema = R"({
                 "name": "test",
