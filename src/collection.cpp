@@ -3344,6 +3344,13 @@ Option<nlohmann::json> Collection::search(collection_search_args_t& coll_args) c
     //long long int timeMillis = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - begin).count();
     //!LOG(INFO) << "Time taken for result calc: " << timeMillis << "us";
     //!store->print_memory_usage();
+
+    // After search_op and before returning Option<nlohmann::json>
+    result["sort_fields_used"] = nlohmann::json::array();
+    for (const auto& sf : search_params->sort_fields_std) {
+        result["sort_fields_used"].push_back(sf.name);
+    }
+
     return Option<nlohmann::json>(result);
 }
 

@@ -5205,7 +5205,7 @@ TEST_F(CollectionVectorTest, HybridSearchWithFilteringAndFlatSearchCutoff) {
     ASSERT_EQ(4, res["hits"].size());
 }
 
-TEST_F(CollectionVectorTest, MultipleSortFieldsWithoutTextMatch) {
+TEST_F(CollectionVectorTest, MultipleSortFieldsWithVectorSearch) {
     nlohmann::json schema = R"({
         "name": "test",
         "fields": [
@@ -5222,6 +5222,20 @@ TEST_F(CollectionVectorTest, MultipleSortFieldsWithoutTextMatch) {
                 "type": "string"
             },
             {
+                "name": "productEmbedding",
+                "type": "float[]",
+                "embed": {
+                    "from": [
+                        "searchText0",
+                        "searchText1",
+                        "searchText2"
+                    ],
+                    "model_config": {
+                        "model_name": "ts/e5-small"
+                    }
+                }
+            },
+            {
                 "name": "genericFlField1",
                 "type": "float",
                 "sort": true
@@ -5234,16 +5248,18 @@ TEST_F(CollectionVectorTest, MultipleSortFieldsWithoutTextMatch) {
         ]
     })"_json;
 
+    EmbedderManager::set_model_dir("/tmp/typesense_test/models");
+
     auto collection_create_op = collectionManager.create_collection(schema);
     ASSERT_TRUE(collection_create_op.ok());
 
     auto coll = collection_create_op.get();
 
-    // Add a test document
+    // Add test documents
     auto add_op = coll->add(R"({
-        "searchText0": "test text",
-        "searchText1": "more text",
-        "searchText2": "even more text",
+        "searchText0": "wall art decoration",
+        "searchText1": "home decor",
+        "searchText2": "wall hanging",
         "genericFlField1": 1.5,
         "genericFlField2": 2.5,
         "id": "0"
@@ -5251,18 +5267,51 @@ TEST_F(CollectionVectorTest, MultipleSortFieldsWithoutTextMatch) {
 
     ASSERT_TRUE(add_op.ok());
 
-    // Search with multiple sort fields
-    auto res = coll->search("test", {"searchText0", "searchText1", "searchText2"}, "", 
-                           {"genericFlField1:desc", "genericFlField2:desc"}, {}, {2}, 10, 1,
-                           FREQUENCY, {true}, Index::DROP_TOKENS_THRESHOLD, 
-                           spp::sparse_hash_set<std::string>(), {}, 10, "", 30, 4, "", 40,
-                           {}, {}, {}, 0, "<mark>", "</mark>", {}, 1000, true, false, true, "", false,
-                           6000*1000, 4, 7, fallback, 4, {off}, INT16_MAX, INT16_MAX, 2, 2, false, "").get();
+    add_op = coll->add(R"({
+        "searchText0": "wall painting",
+        "searchText1": "artwork",
+        "searchText2": "canvas print",
+        "genericFlField1": 2.5,
+        "genericFlField2": 1.5,
+        "id": "1"
+    })"_json.dump());
 
-    // Verify that text match was not added by checking the sort fields in the response
-    ASSERT_EQ(2, res["hits"][0]["sort"].size());
-    ASSERT_EQ("1.5", res["hits"][0]["sort"][0]);
-    ASSERT_EQ("2.5", res["hits"][0]["sort"][1]);
+    ASSERT_TRUE(add_op.ok());
+
+    add_op = coll->add(R"({
+        "searchText0": "wall poster",
+        "searchText1": "print",
+        "searchText2": "wall decoration",
+        "genericFlField1": 3.5,
+        "genericFlField2": 0.5,
+        "id": "2"
+    })"_json.dump());
+
+    ASSERT_TRUE(add_op.ok());
+
+    auto res = coll->search(
+        "stuff to put on my walls", {"name", "embedding"}, "", {},
+        {}, {2}, 10, 1, FREQUENCY, {true},
+        Index::DROP_TOKENS_THRESHOLD, spp::sparse_hash_set<std::string>(),
+        {"embedding"}, 10, "",
+        30, 4, "", 40,
+        {}, {}, {}, 0, "<mark>",
+        "</mark>", {}, 1000, true,
+        false, true, "", false,
+        6000*1000, 4, 7, fallback, 4,
+        {off}, INT16_MAX, INT16_MAX, 2,
+        2, false, "productEmbedding:([0.003480, 0.0])"
+    ).get();
+
+    ASSERT_EQ(3, res["hits"].size());
+    ASSERT_EQ(res["sort_fields_used"].is_array(), true);
+    for (const auto& field : res["sort_fields_used"]) {
+        ASSERT_STRNE(field.get<std::string>().c_str(), "_text_match");
+    }
+    // Verify sort order
+    ASSERT_EQ("2", res["hits"][0]["document"]["id"]);
+    ASSERT_EQ("1", res["hits"][1]["document"]["id"]);
+    ASSERT_EQ("0", res["hits"][2]["document"]["id"]);
 }
 
 TEST_F(CollectionVectorTest, HybridSearchAuxScoreTest) {
