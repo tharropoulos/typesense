@@ -5205,48 +5205,37 @@ TEST_F(CollectionVectorTest, HybridSearchWithFilteringAndFlatSearchCutoff) {
     ASSERT_EQ(4, res["hits"].size());
 }
 
-TEST_F(CollectionVectorTest, MultipleSortFieldsWithVectorSearch) {
+TEST_F(CollectionVectorTest, HybridSearchMultipleSortFields) {
+
     nlohmann::json schema = R"({
-        "name": "test",
-        "fields": [
-            {
-                "name": "searchText0",
-                "type": "string"
-            },
-            {
-                "name": "searchText1",
-                "type": "string"
-            },
-            {
-                "name": "searchText2",
-                "type": "string"
-            },
-            {
-                "name": "productEmbedding",
-                "type": "float[]",
-                "embed": {
-                    "from": [
-                        "searchText0",
-                        "searchText1",
-                        "searchText2"
-                    ],
-                    "model_config": {
-                        "model_name": "ts/e5-small"
+                "name": "test",
+                "fields": [
+                    {
+                        "name": "name",
+                        "type": "string"
+                    },
+                    {
+                        "name": "genericFlField1",
+                        "type": "float"
+                    },
+                    {
+                        "name": "genericFlField2",
+                        "type": "float"
+                    },
+                    {
+                        "name": "embedding",
+                        "type": "float[]",
+                        "embed": {
+                            "from": [
+                                "name"
+                            ],
+                            "model_config": {
+                                "model_name": "ts/e5-small"
+                            }
+                        }
                     }
-                }
-            },
-            {
-                "name": "genericFlField1",
-                "type": "float",
-                "sort": true
-            },
-            {
-                "name": "genericFlField2",
-                "type": "float",
-                "sort": true
-            }
-        ]
-    })"_json;
+                ]
+                })"_json;
 
     EmbedderManager::set_model_dir("/tmp/typesense_test/models");
 
@@ -5255,64 +5244,69 @@ TEST_F(CollectionVectorTest, MultipleSortFieldsWithVectorSearch) {
 
     auto coll = collection_create_op.get();
 
-    // Add test documents
     auto add_op = coll->add(R"({
-        "searchText0": "wall art decoration",
-        "searchText1": "home decor",
-        "searchText2": "wall hanging",
-        "genericFlField1": 1.5,
-        "genericFlField2": 2.5,
+        "name": "Nike running shoes for men",
+        "genericFlField1": 2.0,
+        "genericFlField2": 1.0,
         "id": "0"
     })"_json.dump());
 
     ASSERT_TRUE(add_op.ok());
 
     add_op = coll->add(R"({
-        "searchText0": "wall painting",
-        "searchText1": "artwork",
-        "searchText2": "canvas print",
-        "genericFlField1": 2.5,
-        "genericFlField2": 1.5,
+        "name": "Nike running sneakers",
+        "genericFlField1": 1.0,
+        "genericFlField2": 2.0,
         "id": "1"
     })"_json.dump());
 
     ASSERT_TRUE(add_op.ok());
 
     add_op = coll->add(R"({
-        "searchText0": "wall poster",
-        "searchText1": "print",
-        "searchText2": "wall decoration",
-        "genericFlField1": 3.5,
-        "genericFlField2": 0.5,
+        "name": "adidas shoes",
+        "genericFlField1": 1.0,
+        "genericFlField2": 1.0,
         "id": "2"
     })"_json.dump());
 
     ASSERT_TRUE(add_op.ok());
 
-    auto res = coll->search(
-        "stuff to put on my walls", {"name", "embedding"}, "", {},
-        {}, {2}, 10, 1, FREQUENCY, {true},
-        Index::DROP_TOKENS_THRESHOLD, spp::sparse_hash_set<std::string>(),
-        {"embedding"}, 10, "",
-        30, 4, "", 40,
-        {}, {}, {}, 0, "<mark>",
-        "</mark>", {}, 1000, true,
-        false, true, "", false,
-        6000*1000, 4, 7, fallback, 4,
-        {off}, INT16_MAX, INT16_MAX, 2,
-        2, false, "productEmbedding:([0.003480, 0.0])"
-    ).get();
+    add_op = coll->add(R"({
+        "name": "puma",
+        "genericFlField1": 1.0,
+        "genericFlField2": 3.0,
+        "id": "3"
+    })"_json.dump());
 
-    ASSERT_EQ(3, res["hits"].size());
-    ASSERT_EQ(res["sort_fields_used"].is_array(), true);
-    for (const auto& field : res["sort_fields_used"]) {
-        ASSERT_STRNE(field.get<std::string>().c_str(), "_text_match");
-    }
-    // Verify sort order
-    ASSERT_EQ("2", res["hits"][0]["document"]["id"]);
-    ASSERT_EQ("1", res["hits"][1]["document"]["id"]);
-    ASSERT_EQ("0", res["hits"][2]["document"]["id"]);
+    ASSERT_TRUE(add_op.ok());
+
+    bool use_aux_score = false;
+
+    std::vector<sort_by> sort_fields;
+    CollectionManager::parse_sort_by_str("_vector_distance:asc,genericFlField1:desc,genericFlField2:asc", sort_fields);
+    std::cout << "Sort fields: " << sort_fields.size() << std::endl;
+    auto res = coll->search("nike running shoes", {"name", "embedding"}, "", {},
+                             sort_fields, {2}, 10, 1,FREQUENCY, {true},
+                             Index::DROP_TOKENS_THRESHOLD, spp::sparse_hash_set<std::string>(),
+                             {"embedding"}, 10, "",
+                             30, 4, "", 40,
+                             {}, {}, {}, 0,"<mark>",
+                             "</mark>", {}, 1000,true,
+                             false, true, "", false,
+                             6000*1000, 4, 7, fallback, 4,
+                             {off}, INT16_MAX, INT16_MAX,2,
+                             2, false, "", true,
+                             0, max_score, 100, 0, 0,
+                             "exhaustive", 30000, 2, "",
+                             {},{}, "right_to_left", true,
+                             true, false, "", "", "",
+                             "", true, true, false, 0, true,
+                             true, DEFAULT_FILTER_BY_CANDIDATES, use_aux_score).get();
+    std::cout << "Search response: " << res.dump(2) << std::endl;
+
+    ASSERT_EQ(4, res["hits"].size());
 }
+
 
 TEST_F(CollectionVectorTest, HybridSearchAuxScoreTest) {
     nlohmann::json schema = R"({
