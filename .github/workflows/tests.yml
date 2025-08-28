@@ -94,7 +94,7 @@ jobs:
         options: >-
           --runtime=runc
           --name tei-container
-          -v ${{ github.workspace }}/hf_cache:/data
+          -v ${{ github.workspace }}/.cache/hf:/data
         env:
           MODEL_ID: nomic-ai/nomic-embed-text-v1.5
 
