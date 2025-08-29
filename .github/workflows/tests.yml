@@ -15,6 +15,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          clean: false
 
       - name: Install dependencies
         run: |
@@ -86,18 +88,6 @@ jobs:
     needs: test
     runs-on: ubuntu-22.04
 
-    services:
-      tei:
-        image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.8
-        ports:
-          - 8080:80
-        options: >-
-          --runtime=runc
-          --name tei-container
-          -v ${{ github.workspace }}/.cache/hf:/data
-        env:
-          MODEL_ID: nomic-ai/nomic-embed-text-v1.5
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -108,11 +98,38 @@ jobs:
           name: typesense-server
           path: ./typesense-server-binary
 
+      - name: Download cached model (if exists)
+        uses: actions/download-artifact@v4
+        with:
+          name: tei-model-cache
+          path: ./hf_cache
+        continue-on-error: true
+
+      - name: Check cache contents
+        run: |
+          # Check what we actually downloaded
+          echo "Contents of hf_cache directory:"
+          ls -la ./hf_cache/ || echo "hf_cache directory is empty or doesn't exist"
+
+          # Create empty cache directory if none exists
+          if [ ! -d "./hf_cache" ]; then
+            echo "No cached model found, will download fresh"
+            mkdir -p ./hf_cache
+          fi
+
       - name: Make binary executable
         run: chmod +x ./typesense-server-binary/typesense-server
 
       - name: Install bun
         uses: oven-sh/setup-bun@v2
+
+      - name: Start TEI Container
+        run: |
+          # Start container with cached model directory
+          docker run -d --name tei-container --runtime=runc -p 8080:80 \
+            -v ${{ github.workspace }}/hf_cache:/data \
+            ghcr.io/huggingface/text-embeddings-inference:cpu-1.8 \
+            --model-id nomic-ai/nomic-embed-text-v1.5
 
       - name: Wait for TEI Container to be ready
         run: |
@@ -153,3 +170,17 @@ jobs:
           TYPESENSE_DATA_DIR: ${{ github.workspace }}/tmp/test
           OPEN_AI_API_KEY: ""
         run: typesense-api-tests --no-secrets
+
+      - name: Upload model cache for next run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tei-model-cache
+          path: ./hf_cache
+          retention-days: 7
+
+      - name: Cleanup TEI Container
+        if: always()
+        run: |
+          docker stop tei-container || true
+          docker rm tei-container || true
