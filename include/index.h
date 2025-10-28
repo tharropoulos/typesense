@@ -458,6 +458,9 @@ private:
     id_list_t* seq_ids;
     mutable std::shared_mutex seq_ids_mutex;
 
+    // field => seq_ids of documents with null values (for fields with null_filtering enabled)
+    spp::sparse_hash_map<std::string, id_list_t*> null_index;
+
     std::vector<char> symbols_to_index;
 
     std::vector<char> token_separators;

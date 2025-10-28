@@ -512,6 +512,31 @@ Option<bool> toFilter(const std::string& expression,
     const field& _field = field_it.value();
     std::string&& raw_value = expression.substr(found_index + 1, std::string::npos);
     StringUtils::trim(raw_value);
+
+    // Check for null filtering: field: _nil or field:! _nil
+    bool is_null_check = false;
+    bool is_not_null_check = false;
+    
+    if (raw_value == "_nil") {
+        is_null_check = true;
+    } else if (raw_value.size() >= 1 && raw_value[0] == '!' && raw_value.substr(1) == " _nil") {
+        is_not_null_check = true;
+    } else if (raw_value == "! _nil") {
+        is_not_null_check = true;
+    }
+    
+    if (is_null_check || is_not_null_check) {
+        // Validate that null_filtering is enabled for this field
+        if (!_field.null_filtering) {
+            return Option<bool>(400, "Null filtering is not enabled for field `" + _field.name + "`. " +
+                                     "Set `null_filtering: true` in the field schema.");
+        }
+        
+        NUM_COMPARATOR comparator = is_null_check ? IS_NULL : IS_NOT_NULL;
+        filter_exp = {field_name, {}, {comparator}};
+        return Option<bool>(true);
+    }
+    
     // skip past optional `:=` operator, which has no meaning for non-string fields
     if (!_field.is_string() && raw_value[0] == '=') {
         size_t filter_value_index = 0;

@@ -99,6 +99,9 @@ void field::add_default_json_values(nlohmann::json& json) {
     if (json.count(fields::symbols_to_index) == 0) {
         json[fields::symbols_to_index] = nlohmann::json::array();
     }
+    if (json.count(fields::null_filtering) == 0) {
+        json[fields::null_filtering] = false;
+    }
 }
 
 Option<bool> field::json_field_to_field(bool enable_nested_fields, nlohmann::json& field_json,
@@ -231,6 +234,25 @@ Option<bool> field::json_field_to_field(bool enable_nested_fields, nlohmann::jso
         type != field_types::INT64 && type != field_types::INT64_ARRAY &&
         type != field_types::FLOAT && type != field_types::FLOAT_ARRAY) {
         return Option<bool>(400, std::string("The `range_index` property is only allowed for the numerical fields`"));
+    }
+
+    if (!field_json.at(fields::null_filtering).is_boolean()) {
+        return Option<bool>(400, std::string("The `null_filtering` property of the field `") +
+                                 field_json[fields::name].get<std::string>() +
+                                 std::string("` should be a boolean."));
+    }
+
+    if (field_json[fields::null_filtering].get<bool>()) {
+        if (!field_json[fields::index].get<bool>()) {
+            return Option<bool>(400, std::string("The `null_filtering` property of the field `") +
+                                     field_json[fields::name].get<std::string>() +
+                                     std::string("` requires `index: true`."));
+        }
+        if (!field_json[fields::optional].get<bool>()) {
+            return Option<bool>(400, std::string("The `null_filtering` property of the field `") +
+                                     field_json[fields::name].get<std::string>() +
+                                     std::string("` requires `optional: true`."));
+        }
     }
 
     if(field_json["name"] == ".*") {
@@ -473,7 +495,8 @@ Option<bool> field::json_field_to_field(bool enable_nested_fields, nlohmann::jso
                   field_json[fields::reference], field_json[fields::embed], field_json[fields::range_index], 
                   field_json[fields::store], field_json[fields::stem], field_json[fields::stem_dictionary],
                   field_json[fields::hnsw_params], field_json[fields::async_reference], field_json[fields::token_separators],
-                  field_json[fields::symbols_to_index], field_json[fields::cascade_delete], field_json[fields::truncate_len])
+                  field_json[fields::symbols_to_index], field_json[fields::cascade_delete], field_json[fields::truncate_len],
+                  field_json[fields::null_filtering])
     );
 
     if (!field_json[fields::reference].get<std::string>().empty()) {
@@ -906,6 +929,7 @@ nlohmann::json field::field_to_json_field(const struct field& field) {
     field_val[fields::stem] = field.stem;
     field_val[fields::range_index] = field.range_index;
     field_val[fields::stem_dictionary] = field.stem_dictionary;
+    field_val[fields::null_filtering] = field.null_filtering;
 
     if(field.embed.count(fields::from) != 0) {
         field_val[fields::embed] = field.embed;

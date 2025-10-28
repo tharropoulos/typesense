@@ -1159,6 +1159,43 @@ void filter_result_iterator_t::init(const bool& enable_lazy_evaluation, const bo
 
     field f = index->search_schema.at(a_filter.field_name);
 
+    // Handle IS_NULL and IS_NOT_NULL comparators
+    if (!a_filter.comparators.empty() && (a_filter.comparators[0] == IS_NULL || a_filter.comparators[0] == IS_NOT_NULL)) {
+        auto null_ids_it = index->null_index.find(a_filter.field_name);
+        if (null_ids_it == index->null_index.end()) {
+            status = Option<bool>(400, "Null filtering is not enabled for field `" + a_filter.field_name + "`.");
+            validity = invalid;
+            return;
+        }
+
+        if (a_filter.comparators[0] == IS_NULL) {
+            // Return documents where field is null
+            filter_result.count = null_ids_it->second->num_ids();
+            filter_result.docs = null_ids_it->second->uncompress();
+        } else {
+            // IS_NOT_NULL: Return all documents except those with null values
+            auto null_ids = null_ids_it->second->uncompress();
+            auto null_count = null_ids_it->second->num_ids();
+            auto all_ids = index->seq_ids->uncompress();
+            
+            filter_result.count = ArrayUtils::exclude_scalar(all_ids, index->seq_ids->num_ids(),
+                                                            null_ids, null_count, &filter_result.docs);
+            delete[] all_ids;
+            delete[] null_ids;
+        }
+
+        is_filter_result_initialized = true;
+
+        if (filter_result.count == 0) {
+            validity = invalid;
+            return;
+        }
+
+        seq_id = filter_result.docs[result_index];
+        approx_filter_ids_length = filter_result.count;
+        return;
+    }
+
     if (f.is_integer()) {
         if (f.range_index) {
             auto const& trie = index->range_index.at(a_filter.field_name);

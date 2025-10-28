@@ -3807,3 +3807,229 @@ TEST_F(CollectionSpecificMoreTest, PhraseQueryHighlightingShouldNotHighlightPart
     
     collectionManager.drop_collection("coll1");
 }
+
+TEST_F(CollectionSpecificMoreTest, NullFilteringIntegration) {
+    // Create collection with various field types having null_filtering enabled
+    nlohmann::json schema = R"({
+        "name": "products",
+        "fields": [
+            {"name": "product_id", "type": "string"},
+            {"name": "name", "type": "string"},
+            {"name": "price", "type": "float", "optional": true, "null_filtering": true},
+            {"name": "stock", "type": "int32", "optional": true, "null_filtering": true},
+            {"name": "description", "type": "string", "optional": true, "null_filtering": true},
+            {"name": "on_sale", "type": "bool", "optional": true, "null_filtering": true},
+            {"name": "rating", "type": "float", "optional": true, "null_filtering": false}
+        ]
+    })"_json;
+
+    Collection* coll = collectionManager.create_collection(schema).get();
+
+    // Add documents with various null/non-null combinations
+    nlohmann::json doc1;
+    doc1["id"] = "1";
+    doc1["product_id"] = "1";
+    doc1["name"] = "Laptop";
+    doc1["price"] = 999.99;
+    doc1["stock"] = 10;
+    doc1["description"] = "High-performance laptop";
+    doc1["on_sale"] = true;
+    doc1["rating"] = 4.5;
+    ASSERT_TRUE(coll->add(doc1.dump()).ok());
+
+    nlohmann::json doc2;
+    doc2["id"] = "2";
+    doc2["product_id"] = "2";
+    doc2["name"] = "Mouse";
+    // price is null (not included)
+    doc2["stock"] = 50;
+    doc2["description"] = "Wireless mouse";
+    doc2["on_sale"] = false;
+    doc2["rating"] = 4.0;
+    ASSERT_TRUE(coll->add(doc2.dump()).ok());
+
+    nlohmann::json doc3;
+    doc3["id"] = "3";
+    doc3["product_id"] = "3";
+    doc3["name"] = "Keyboard";
+    doc3["price"] = 79.99;
+    // stock is null (not included)
+    doc3["description"] = "Mechanical keyboard";
+    doc3["on_sale"] = true;
+    // rating is null (not included)
+    ASSERT_TRUE(coll->add(doc3.dump()).ok());
+
+    nlohmann::json doc4;
+    doc4["id"] = "4";
+    doc4["product_id"] = "4";
+    doc4["name"] = "Monitor";
+    doc4["price"] = 299.99;
+    doc4["stock"] = 5;
+    // description is null (not included)
+    // on_sale is null (not included)
+    doc4["rating"] = 5.0;
+    ASSERT_TRUE(coll->add(doc4.dump()).ok());
+
+    nlohmann::json doc5;
+    doc5["id"] = "5";
+    doc5["product_id"] = "5";
+    doc5["name"] = "Headphones";
+    // All optional fields are null (not included)
+    ASSERT_TRUE(coll->add(doc5.dump()).ok());
+
+    // Test 1: Search for products with null price
+    auto results = coll->search("*", {}, "price: _nil", {}, {}, {0}, 10).get();
+    ASSERT_EQ(2, results["found"].get<size_t>());
+    ASSERT_EQ(2, results["hits"].size());
+    
+    std::set<std::string> null_price_ids;
+    for (auto& hit : results["hits"]) {
+        null_price_ids.insert(hit["document"]["product_id"].get<std::string>());
+    }
+    ASSERT_TRUE(null_price_ids.count("2") > 0);
+    ASSERT_TRUE(null_price_ids.count("5") > 0);
+
+    // Test 2: Search for products with non-null price
+    results = coll->search("*", {}, "price:! _nil", {}, {}, {0}, 10).get();
+    ASSERT_EQ(3, results["found"].get<size_t>());
+    ASSERT_EQ(3, results["hits"].size());
+    
+    std::set<std::string> non_null_price_ids;
+    for (auto& hit : results["hits"]) {
+        non_null_price_ids.insert(hit["document"]["product_id"].get<std::string>());
+    }
+    ASSERT_TRUE(non_null_price_ids.count("1") > 0);
+    ASSERT_TRUE(non_null_price_ids.count("3") > 0);
+    ASSERT_TRUE(non_null_price_ids.count("4") > 0);
+
+    // Test 3: Search for products with null stock
+    results = coll->search("*", {}, "stock: _nil", {}, {}, {0}, 10).get();
+    ASSERT_EQ(2, results["found"].get<size_t>());
+    ASSERT_EQ(2, results["hits"].size());
+    
+    std::set<std::string> null_stock_ids;
+    for (auto& hit : results["hits"]) {
+        null_stock_ids.insert(hit["document"]["product_id"].get<std::string>());
+    }
+    ASSERT_TRUE(null_stock_ids.count("3") > 0);
+    ASSERT_TRUE(null_stock_ids.count("5") > 0);
+
+    // Test 4: Search for products with null description (string field)
+    results = coll->search("*", {}, "description: _nil", {}, {}, {0}, 10).get();
+    ASSERT_EQ(2, results["found"].get<size_t>());
+    ASSERT_EQ(2, results["hits"].size());
+    
+    std::set<std::string> null_desc_ids;
+    for (auto& hit : results["hits"]) {
+        null_desc_ids.insert(hit["document"]["product_id"].get<std::string>());
+    }
+    ASSERT_TRUE(null_desc_ids.count("4") > 0);
+    ASSERT_TRUE(null_desc_ids.count("5") > 0);
+
+    // Test 5: Search for products with null on_sale (bool field)
+    results = coll->search("*", {}, "on_sale: _nil", {}, {}, {0}, 10).get();
+    ASSERT_EQ(2, results["found"].get<size_t>());
+    ASSERT_EQ(2, results["hits"].size());
+    
+    std::set<std::string> null_sale_ids;
+    for (auto& hit : results["hits"]) {
+        null_sale_ids.insert(hit["document"]["product_id"].get<std::string>());
+    }
+    ASSERT_TRUE(null_sale_ids.count("4") > 0);
+    ASSERT_TRUE(null_sale_ids.count("5") > 0);
+
+    // Test 6: Combine null filter with other filters
+    results = coll->search("*", {}, "price: _nil && stock:! _nil", {}, {}, {0}, 10).get();
+    ASSERT_EQ(1, results["found"].get<size_t>());
+    ASSERT_EQ("2", results["hits"][0]["document"]["product_id"].get<std::string>());
+
+    // Test 7: Combine null filter with range filter
+    results = coll->search("*", {}, "price:! _nil && price: < 300", {}, {}, {0}, 10).get();
+    ASSERT_EQ(2, results["found"].get<size_t>());
+    
+    std::set<std::string> filtered_ids;
+    for (auto& hit : results["hits"]) {
+        filtered_ids.insert(hit["document"]["product_id"].get<std::string>());
+    }
+    ASSERT_TRUE(filtered_ids.count("3") > 0);
+    ASSERT_TRUE(filtered_ids.count("4") > 0);
+
+    // Test 8: Search with text query and null filter
+    results = coll->search("laptop", {"name"}, "on_sale:! _nil", {}, {}, {0}, 10).get();
+    ASSERT_EQ(1, results["found"].get<size_t>());
+    ASSERT_EQ("1", results["hits"][0]["document"]["product_id"].get<std::string>());
+
+    // Test 9: Update document - add missing field (use UPSERT to replace entire document)
+    nlohmann::json doc2_update;
+    doc2_update["id"] = "2";
+    doc2_update["product_id"] = "2";
+    doc2_update["name"] = "Mouse";
+    doc2_update["price"] = 29.99; // Now adding price
+    doc2_update["stock"] = 50;
+    doc2_update["description"] = "Wireless mouse";
+    doc2_update["on_sale"] = false;
+    doc2_update["rating"] = 4.0;
+    ASSERT_TRUE(coll->add(doc2_update.dump(), UPSERT).ok());
+
+    // Verify price is no longer null for doc2
+    results = coll->search("*", {}, "price: _nil", {}, {}, {0}, 10).get();
+    ASSERT_EQ(1, results["found"].get<size_t>()); // Only doc5 now
+    ASSERT_EQ("5", results["hits"][0]["document"]["product_id"].get<std::string>());
+
+    // Test 10: Update document - remove field (set to null via UPSERT)
+    nlohmann::json doc3_update;
+    doc3_update["id"] = "3";
+    doc3_update["product_id"] = "3";
+    doc3_update["name"] = "Keyboard";
+    // price is now missing (null) - UPSERT replaces entire doc
+    doc3_update["description"] = "Mechanical keyboard";
+    doc3_update["on_sale"] = true;
+    ASSERT_TRUE(coll->add(doc3_update.dump(), UPSERT).ok());
+
+    // Verify price is now null for doc3
+    results = coll->search("*", {}, "price: _nil", {}, {}, {0}, 10).get();
+    ASSERT_EQ(2, results["found"].get<size_t>()); // doc3 and doc5
+    
+    std::set<std::string> updated_null_price_ids;
+    for (auto& hit : results["hits"]) {
+        updated_null_price_ids.insert(hit["document"]["product_id"].get<std::string>());
+    }
+    ASSERT_TRUE(updated_null_price_ids.count("3") > 0);
+    ASSERT_TRUE(updated_null_price_ids.count("5") > 0);
+
+    // Test 11: Error case - using _nil on field without null_filtering
+    auto search_op = coll->search("*", {}, "rating: _nil", {}, {}, {0}, 10);
+    ASSERT_FALSE(search_op.ok());
+    ASSERT_NE(std::string::npos, search_op.error().find("Null filtering is not enabled for field `rating`"));
+
+    // Test 12: Complex query with multiple null filters
+    results = coll->search("*", {}, "price: _nil || stock: _nil", {}, {}, {0}, 10).get();
+    ASSERT_EQ(3, results["found"].get<size_t>()); // doc3, doc5, and one more
+    
+    // Test 13: Verify all documents are still accessible
+    results = coll->search("*", {}, "", {}, {}, {0}, 10).get();
+    ASSERT_EQ(5, results["found"].get<size_t>());
+
+    // Test 14: Delete document and verify null tracking is updated
+    ASSERT_TRUE(coll->remove("5").ok());
+    
+    results = coll->search("*", {}, "price: _nil", {}, {}, {0}, 10).get();
+    ASSERT_EQ(1, results["found"].get<size_t>()); // Only doc3 now
+    ASSERT_EQ("3", results["hits"][0]["document"]["product_id"].get<std::string>());
+
+    // Test 15: Add new document with null fields
+    nlohmann::json doc6;
+    doc6["id"] = "6";
+    doc6["product_id"] = "6";
+    doc6["name"] = "Webcam";
+    doc6["price"] = 59.99;
+    // stock, description, on_sale are null
+    doc6["rating"] = 3.5;
+    ASSERT_TRUE(coll->add(doc6.dump()).ok());
+
+    results = coll->search("*", {}, "stock: _nil && description: _nil && on_sale: _nil", {}, {}, {0}, 10).get();
+    ASSERT_EQ(1, results["found"].get<size_t>());
+    ASSERT_EQ("6", results["hits"][0]["document"]["product_id"].get<std::string>());
+
+    collectionManager.drop_collection("products");
+}

@@ -142,6 +142,10 @@ Index::Index(const std::string& name, const uint32_t collection_id, const Store*
                 }
             }
         }
+
+        if (a_field.null_filtering) {
+            null_index.emplace(a_field.name, new id_list_t(256));
+        }
     }
 
     num_documents = 0;
@@ -234,6 +238,13 @@ Index::~Index() {
     }
 
     object_array_reference_index.clear();
+
+    for(auto & name_list: null_index) {
+        delete name_list.second;
+        name_list.second = nullptr;
+    }
+
+    null_index.clear();
 
     for(auto& geopolygon_index : field_geopolygon_index) {
         delete  geopolygon_index.second;
@@ -651,6 +662,35 @@ size_t Index::batch_memory_index(Index *index,
         }
     }
 
+    // Track null values for all fields with null_filtering enabled BEFORE field-specific indexing
+    for(const auto& afield: indexable_schema) {
+        if(afield.null_filtering) {
+            auto null_ids_it = index->null_index.find(afield.name);
+            if(null_ids_it != index->null_index.end()) {
+                for(const auto& record: iter_batch) {
+                    if(!record.indexed.ok()) {
+                        continue;
+                    }
+                    
+                    // Field is null if it's missing OR if it has an explicit null value
+                    // For updates, check new_doc (the full merged document), not doc (just changes)
+                    const nlohmann::json& doc_to_check = record.is_update ? record.new_doc : record.doc;
+                    bool field_is_missing = (doc_to_check.count(afield.name) == 0);
+                    bool has_null_value = !field_is_missing && doc_to_check[afield.name].is_null();
+                    bool field_is_null = field_is_missing || has_null_value;
+                    
+                    if(field_is_null) {
+                        null_ids_it->second->upsert(record.seq_id);
+                    } else {
+                        null_ids_it->second->erase(record.seq_id);
+                    }
+                }
+                LOG(INFO) << "  After batch: field=" << afield.name 
+                          << ", null_count=" << null_ids_it->second->num_ids();
+            }
+        }
+    }
+
     num_queued = num_processed = 0;
     std::unique_lock ulock(index->mutex);
 
@@ -712,6 +752,8 @@ void Index::index_field_in_memory(const std::string& collection_name, const fiel
     if(!afield.index) {
         return;
     }
+
+    // Null tracking now happens in batch_memory_index before field-specific indexing
 
     // We have to handle both these edge cases:
     // a) `afield` might not exist in the document (optional field)
@@ -7527,6 +7569,18 @@ Option<uint32_t> Index::remove(const uint32_t seq_id, nlohmann::json & document,
         }
     }
 
+    // Clean up null_index entries for this document
+    // During updates, we clean up all null_index entries and let re-indexing set the correct state
+    // During deletes, we clean up all null_index entries and remove from seq_ids
+    for(const auto& field_entry: search_schema) {
+        if(field_entry.null_filtering) {
+            auto null_ids_it = null_index.find(field_entry.name);
+            if(null_ids_it != null_index.end()) {
+                null_ids_it->second->erase(seq_id);
+            }
+        }
+    }
+    
     if(!is_update) {
         seq_ids->erase(seq_id);
     }
