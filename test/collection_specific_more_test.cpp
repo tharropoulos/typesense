@@ -3938,6 +3938,48 @@ TEST_F(CollectionSpecificMoreTest, NullFilteringIntegration) {
     ASSERT_TRUE(null_sale_ids.count("4") > 0);
     ASSERT_TRUE(null_sale_ids.count("5") > 0);
 
+    // Test 5a: Search for products with NON-NULL stock (opposite of Test 3)
+    results = coll->search("*", {}, "stock:! _nil", {}, {}, {0}, 10).get();
+    ASSERT_EQ(3, results["found"].get<size_t>());
+    ASSERT_EQ(3, results["hits"].size());
+    
+    std::set<std::string> non_null_stock_ids;
+    for (auto& hit : results["hits"]) {
+        non_null_stock_ids.insert(hit["document"]["product_id"].get<std::string>());
+    }
+    ASSERT_TRUE(non_null_stock_ids.count("1") > 0);  // doc1 has stock
+    ASSERT_TRUE(non_null_stock_ids.count("2") > 0);  // doc2 has stock
+    ASSERT_TRUE(non_null_stock_ids.count("4") > 0);  // doc4 has stock
+    // doc3 and doc5 don't have stock
+
+    // Test 5b: Search for products with NON-NULL description (string field)
+    results = coll->search("*", {}, "description:! _nil", {}, {}, {0}, 10).get();
+    ASSERT_EQ(3, results["found"].get<size_t>());
+    ASSERT_EQ(3, results["hits"].size());
+    
+    std::set<std::string> non_null_desc_ids;
+    for (auto& hit : results["hits"]) {
+        non_null_desc_ids.insert(hit["document"]["product_id"].get<std::string>());
+    }
+    ASSERT_TRUE(non_null_desc_ids.count("1") > 0);  // doc1 has description
+    ASSERT_TRUE(non_null_desc_ids.count("2") > 0);  // doc2 has description
+    ASSERT_TRUE(non_null_desc_ids.count("3") > 0);  // doc3 has description
+    // doc4 and doc5 don't have description
+
+    // Test 5c: Search for products with NON-NULL on_sale (bool field)
+    results = coll->search("*", {}, "on_sale:! _nil", {}, {}, {0}, 10).get();
+    ASSERT_EQ(3, results["found"].get<size_t>());
+    ASSERT_EQ(3, results["hits"].size());
+    
+    std::set<std::string> non_null_sale_ids;
+    for (auto& hit : results["hits"]) {
+        non_null_sale_ids.insert(hit["document"]["product_id"].get<std::string>());
+    }
+    ASSERT_TRUE(non_null_sale_ids.count("1") > 0);  // doc1 has on_sale
+    ASSERT_TRUE(non_null_sale_ids.count("2") > 0);  // doc2 has on_sale
+    ASSERT_TRUE(non_null_sale_ids.count("3") > 0);  // doc3 has on_sale
+    // doc4 and doc5 don't have on_sale
+
     // Test 6: Combine null filter with other filters
     results = coll->search("*", {}, "price: _nil && stock:! _nil", {}, {}, {0}, 10).get();
     ASSERT_EQ(1, results["found"].get<size_t>());
@@ -4004,7 +4046,7 @@ TEST_F(CollectionSpecificMoreTest, NullFilteringIntegration) {
 
     // Test 12: Complex query with multiple null filters
     results = coll->search("*", {}, "price: _nil || stock: _nil", {}, {}, {0}, 10).get();
-    ASSERT_EQ(3, results["found"].get<size_t>()); // doc3, doc5, and one more
+    ASSERT_EQ(2, results["found"].get<size_t>()); // doc3 and doc5
     
     // Test 13: Verify all documents are still accessible
     results = coll->search("*", {}, "", {}, {}, {0}, 10).get();
