@@ -3807,3 +3807,383 @@ TEST_F(CollectionSpecificMoreTest, PhraseQueryHighlightingShouldNotHighlightPart
     
     collectionManager.drop_collection("coll1");
 }
+
+TEST_F(CollectionSpecificMoreTest, PhraseQueryHighlightingInNestedFields) {
+    nlohmann::json schema = R"({
+        "name": "coll1",
+        "enable_nested_fields": true,
+        "fields": [
+            {"name": "education", "type": "object[]"},
+            {"name": "education.school", "type": "string[]"},
+            {"name": "summary", "type": "string"}
+        ]
+    })"_json;
+
+    auto op = collectionManager.create_collection(schema);
+    ASSERT_TRUE(op.ok());
+    Collection* coll1 = op.get();
+
+    // Document 1: phrase at start of nested field only
+    nlohmann::json doc1;
+    doc1["id"] = "1";
+    doc1["education"] = nlohmann::json::array();
+    nlohmann::json edu1;
+    edu1["school"] = "Harvard Business School";
+    edu1["degree_name"] = "MBA";
+    doc1["education"].push_back(edu1);
+    doc1["summary"] = "I grow businesses and develop creative strategies";
+    ASSERT_TRUE(coll1->add(doc1.dump()).ok());
+
+    // Document 2: phrase in flat field only (works correctly)
+    nlohmann::json doc2;
+    doc2["id"] = "2";
+    doc2["education"] = nlohmann::json::array();
+    nlohmann::json edu2;
+    edu2["school"] = "Duke University";
+    edu2["degree_name"] = "BA";
+    doc2["education"].push_back(edu2);
+    doc2["summary"] = "Eric holds an MBA from Harvard Business School and a B.A. in Economics";
+    ASSERT_TRUE(coll1->add(doc2.dump()).ok());
+
+    // Document 3: phrase in both nested and flat fields, with non-matching nested entry
+    nlohmann::json doc3;
+    doc3["id"] = "3";
+    doc3["education"] = nlohmann::json::array();
+    nlohmann::json edu3;
+    edu3["school"] = "Harvard Business School";
+    edu3["degree_name"] = "MBA";
+    doc3["education"].push_back(edu3);
+    nlohmann::json edu3b;
+    edu3b["school"] = "Duke University";
+    edu3b["degree_name"] = "BA";
+    doc3["education"].push_back(edu3b);
+    doc3["summary"] = "Eric holds an MBA from Harvard Business School and a B.A. in Economics";
+    ASSERT_TRUE(coll1->add(doc3.dump()).ok());
+
+    // Document 4: phrase in middle of nested field text (like "Northwestern University & Harvard Business School")
+    nlohmann::json doc4;
+    doc4["id"] = "4";
+    doc4["education"] = nlohmann::json::array();
+    nlohmann::json edu4;
+    edu4["school"] = "Harvard Business School";
+    edu4["degree_name"] = "MBA";
+    doc4["education"].push_back(edu4);
+    nlohmann::json edu4b;
+    edu4b["school"] = "Northwestern University & Harvard Business School";
+    edu4b["degree_name"] = "BS";
+    doc4["education"].push_back(edu4b);
+    nlohmann::json edu4c;
+    edu4c["school"] = "MIT";
+    edu4c["degree_name"] = "PhD";
+    doc4["education"].push_back(edu4c);
+    doc4["summary"] = "I am a business leader with experience in technology";
+    ASSERT_TRUE(coll1->add(doc4.dump()).ok());
+
+    // Document 5: phrase in flat field, no phrase in nested fields
+    nlohmann::json doc5;
+    doc5["id"] = "5";
+    doc5["education"] = nlohmann::json::array();
+    nlohmann::json edu5;
+    edu5["school"] = "Stanford University";
+    edu5["degree_name"] = "MS";
+    doc5["education"].push_back(edu5);
+    nlohmann::json edu5b;
+    edu5b["school"] = "Yale University";
+    edu5b["degree_name"] = "BA";
+    doc5["education"].push_back(edu5b);
+    doc5["summary"] = "John earned an MBA from Harvard Business School, and a B.S., summa cum laude";
+    ASSERT_TRUE(coll1->add(doc5.dump()).ok());
+
+    // Document 6: multiple nested entries with phrase, phrase in different positions
+    nlohmann::json doc6;
+    doc6["id"] = "6";
+    doc6["education"] = nlohmann::json::array();
+    nlohmann::json edu6;
+    edu6["school"] = "Harvard Business School";
+    edu6["degree_name"] = "MBA";
+    doc6["education"].push_back(edu6);
+    nlohmann::json edu6b;
+    edu6b["school"] = "Northwestern University & Harvard Business School";
+    edu6b["degree_name"] = "BS";
+    doc6["education"].push_back(edu6b);
+    nlohmann::json edu6c;
+    edu6c["school"] = "Harvard Business School Online";
+    edu6c["degree_name"] = "Certificate";
+    doc6["education"].push_back(edu6c);
+    doc6["summary"] = "John earned an MBA from Harvard Business School, and a B.S., summa cum laude";
+    ASSERT_TRUE(coll1->add(doc6.dump()).ok());
+
+    auto results = coll1->search("\"harvard business school\"", {"education.school", "summary"}, "", {}, {}, {0}, 10, 1, FREQUENCY, {true}, 0,
+                                 spp::sparse_hash_set<std::string>(),
+                                 spp::sparse_hash_set<std::string>(), 10, "", 30, 4, "", 20, {}, {}, {}, 0,
+                                 "<mark>", "</mark>", {}, 1000, true, false, true, "", false, 6000 * 1000, 4, 7,
+                                 fallback, 1000).get();
+
+    ASSERT_EQ(6, results["hits"].size());
+
+    // Document 1: phrase at start of nested field only - should be highlighted
+    bool found_doc1 = false;
+    for (size_t i = 0; i < results["hits"].size(); i++) {
+        if (results["hits"][i]["document"]["id"].get<std::string>() == "1") {
+            found_doc1 = true;
+            ASSERT_TRUE(results["hits"][i].count("highlight") > 0) 
+                << "Document 1 should have highlight object";
+            ASSERT_TRUE(results["hits"][i]["highlight"].count("education") > 0)
+                << "Document 1 should have education in highlight object";
+            
+            bool found_highlight = false;
+            for (const auto& edu_entry : results["hits"][i]["highlight"]["education"]) {
+                if (edu_entry.count("school") > 0) {
+                    const auto& school_highlight = edu_entry["school"];
+                    if (school_highlight.count("snippet") > 0) {
+                        std::string snippet = school_highlight["snippet"].get<std::string>();
+                        if (snippet.find("<mark>Harvard</mark>") != std::string::npos &&
+                            snippet.find("<mark>Business</mark>") != std::string::npos &&
+                            snippet.find("<mark>School</mark>") != std::string::npos) {
+                            found_highlight = true;
+                            ASSERT_GE(school_highlight["matched_tokens"].size(), 3);
+                            break;
+                        }
+                    }
+                }
+            }
+            ASSERT_TRUE(found_highlight) << "Document 1 should have highlight for education.school";
+            break;
+        }
+    }
+    ASSERT_TRUE(found_doc1);
+
+    // Document 2: phrase in flat field only - should be highlighted in highlights array
+    bool found_doc2 = false;
+    for (size_t i = 0; i < results["hits"].size(); i++) {
+        if (results["hits"][i]["document"]["id"].get<std::string>() == "2") {
+            found_doc2 = true;
+            ASSERT_TRUE(results["hits"][i].count("highlights") > 0);
+            ASSERT_GT(results["hits"][i]["highlights"].size(), 0);
+            std::string snippet = results["hits"][i]["highlights"][0]["snippet"].get<std::string>();
+            ASSERT_TRUE(snippet.find("<mark>Harvard</mark>") != std::string::npos);
+            ASSERT_TRUE(snippet.find("<mark>Business</mark>") != std::string::npos);
+            ASSERT_TRUE(snippet.find("<mark>School</mark>") != std::string::npos);
+            break;
+        }
+    }
+    ASSERT_TRUE(found_doc2);
+
+
+    // Document 3 (phrase in both nested and flat fields) should have highlights in both
+    bool found_doc3 = false;
+    for (size_t i = 0; i < results["hits"].size(); i++) {
+        if (results["hits"][i]["document"]["id"].get<std::string>() == "3") {
+            found_doc3 = true;
+            
+            // Should have highlight for summary in highlights array (flat field)
+            bool found_summary_highlight = false;
+            if (results["hits"][i].count("highlights") > 0) {
+                for (const auto& highlight : results["hits"][i]["highlights"]) {
+                    std::string field_name = highlight["field"].get<std::string>();
+                    if (field_name == "summary") {
+                        found_summary_highlight = true;
+                        std::string snippet = highlight["snippet"].get<std::string>();
+                        ASSERT_TRUE(snippet.find("<mark>Harvard</mark>") != std::string::npos)
+                            << "Summary highlight should contain 'Harvard'";
+                        ASSERT_TRUE(snippet.find("<mark>Business</mark>") != std::string::npos)
+                            << "Summary highlight should contain 'Business'";
+                        ASSERT_TRUE(snippet.find("<mark>School</mark>") != std::string::npos)
+                            << "Summary highlight should contain 'School'";
+                        break;
+                    }
+                }
+            }
+            ASSERT_TRUE(found_summary_highlight) 
+                << "Document 3 should have highlight for summary field";
+            
+            // Should have highlight for education.school in highlight object (nested field)
+            // Only the matching entry (Harvard Business School) should be present,
+            // NOT the non-matching entry (Duke University) - it should be completely absent
+            bool found_education_highlight = false;
+            int highlighted_entries = 0;
+            int total_entries = 0;
+            if (results["hits"][i].count("highlight") > 0 && 
+                results["hits"][i]["highlight"].count("education") > 0) {
+                for (const auto& edu_entry : results["hits"][i]["highlight"]["education"]) {
+                    total_entries++;
+                    if (edu_entry.count("school") > 0) {
+                        const auto& school_highlight = edu_entry["school"];
+                        if (school_highlight.count("snippet") > 0) {
+                            std::string snippet = school_highlight["snippet"].get<std::string>();
+                            // Check if this is the matching entry (Harvard Business School)
+                            if (snippet.find("<mark>Harvard</mark>") != std::string::npos &&
+                                snippet.find("<mark>Business</mark>") != std::string::npos &&
+                                snippet.find("<mark>School</mark>") != std::string::npos) {
+                                found_education_highlight = true;
+                                ASSERT_GE(school_highlight["matched_tokens"].size(), 3);
+                                highlighted_entries++;
+                            } else {
+                                ASSERT_TRUE(snippet.empty()) 
+                                    << "Non-matching education entry should have empty snippet. "
+                                    << "Got snippet: '" << snippet << "'";
+                            }
+                        }
+                    }
+                }
+            }
+            ASSERT_TRUE(found_education_highlight) 
+                << "Document 3 should have highlight for education.school field with phrase match";
+            // Should only have 1 entry total (the matching one, non-matching should be empty)
+            ASSERT_EQ(total_entries, 2) 
+                << "Should only have the matching education entry, non-matching ones should be absent";
+            break;
+        }
+    }
+    ASSERT_TRUE(found_doc3);
+
+    // Document 4: phrase in nested field with phrase in middle of text ("Northwestern University & Harvard Business School")
+    // Should highlight BOTH matching entries: "Harvard Business School" AND "Northwestern University & Harvard Business School"
+    // Non-matching entry "MIT" should be completely absent
+    bool found_doc4 = false;
+    for (size_t i = 0; i < results["hits"].size(); i++) {
+        if (results["hits"][i]["document"]["id"].get<std::string>() == "4") {
+            found_doc4 = true;
+            ASSERT_TRUE(results["hits"][i].count("highlight") > 0)
+                << "Document 4 should have highlight object";
+            ASSERT_TRUE(results["hits"][i]["highlight"].count("education") > 0)
+                << "Document 4 should have education in highlight object";
+            
+            int matching_entries = 0;
+            int total_entries = 0;
+            bool found_exact_match = false;
+            bool found_embedded_match = false;
+            
+            for (const auto& edu_entry : results["hits"][i]["highlight"]["education"]) {
+                total_entries++;
+                if (edu_entry.count("school") > 0) {
+                    const auto& school_highlight = edu_entry["school"];
+                    if (school_highlight.count("snippet") > 0) {
+                        std::string snippet = school_highlight["snippet"].get<std::string>();
+                        if (snippet.find("<mark>Harvard</mark>") != std::string::npos &&
+                            snippet.find("<mark>Business</mark>") != std::string::npos &&
+                            snippet.find("<mark>School</mark>") != std::string::npos) {
+                            matching_entries++;
+                            if (snippet == "<mark>Harvard</mark> <mark>Business</mark> <mark>School</mark>") {
+                                found_exact_match = true;
+                            } else if (snippet.find("Northwestern") != std::string::npos) {
+                                found_embedded_match = true;
+                            }
+                            ASSERT_GE(school_highlight["matched_tokens"].size(), 3);
+                        }
+                    }
+                }
+            }
+            ASSERT_EQ(matching_entries, 2) 
+                << "Document 4 should highlight both 'Harvard Business School' and 'Northwestern University & Harvard Business School'";
+            ASSERT_TRUE(found_exact_match) 
+                << "Document 4 should have highlight for exact match 'Harvard Business School'";
+            ASSERT_TRUE(found_embedded_match) 
+                << "Document 4 should have highlight for embedded match 'Northwestern University & Harvard Business School'";
+            ASSERT_EQ(total_entries, 3) 
+                << "Document 4 should only have matching entries, non-matching 'MIT' should be empty";
+            break;
+        }
+    }
+    ASSERT_TRUE(found_doc4);
+
+    // Document 5: phrase in flat field only, no phrase in nested fields
+    // Should have highlight in highlights array for summary, but no highlight object for education
+    bool found_doc5 = false;
+    for (size_t i = 0; i < results["hits"].size(); i++) {
+        if (results["hits"][i]["document"]["id"].get<std::string>() == "5") {
+            found_doc5 = true;
+            // Should have highlight for summary in highlights array
+            bool found_summary = false;
+            if (results["hits"][i].count("highlights") > 0) {
+                for (const auto& highlight : results["hits"][i]["highlights"]) {
+                    if (highlight["field"].get<std::string>() == "summary") {
+                        found_summary = true;
+                        std::string snippet = highlight["snippet"].get<std::string>();
+                        ASSERT_TRUE(snippet.find("<mark>Harvard</mark>") != std::string::npos);
+                        ASSERT_TRUE(snippet.find("<mark>Business</mark>") != std::string::npos);
+                        ASSERT_TRUE(snippet.find("<mark>School</mark>") != std::string::npos);
+                        break;
+                    }
+                }
+            }
+            ASSERT_TRUE(found_summary) << "Document 5 should have highlight for summary";
+            
+            // Should NOT have highlight object for education (no matches in nested fields)
+            if (results["hits"][i].count("highlight") > 0) {
+                if (results["hits"][i]["highlight"].count("education") > 0) {
+                    // If education exists, it should be empty (no matching entries)
+                    ASSERT_EQ(results["hits"][i]["highlight"]["education"].size(), 0)
+                        << "Document 5 should not have any education highlights (no phrase matches)";
+                }
+            }
+            break;
+        }
+    }
+    ASSERT_TRUE(found_doc5);
+
+    // Document 6: multiple nested entries with phrase in different positions
+    // Should highlight ALL matching entries: "Harvard Business School", "Northwestern University & Harvard Business School", "Harvard Business School Online"
+    // All three should be highlighted
+    bool found_doc6 = false;
+    for (size_t i = 0; i < results["hits"].size(); i++) {
+        if (results["hits"][i]["document"]["id"].get<std::string>() == "6") {
+            found_doc6 = true;
+            ASSERT_TRUE(results["hits"][i].count("highlight") > 0);
+            ASSERT_TRUE(results["hits"][i]["highlight"].count("education") > 0);
+            
+            std::cout << "\n=== Document 6 Hits Debug ===" << std::endl;
+            std::cout << "Full hit: " << results["hits"][i].dump(2) << std::endl;
+            std::cout << "=== End Document 6 Debug ===\n" << std::endl;
+            
+            int matching_entries = 0;
+            bool found_exact = false;
+            bool found_northwestern = false;
+            bool found_online = false;
+            
+            for (const auto& edu_entry : results["hits"][i]["highlight"]["education"]) {
+                if (edu_entry.count("school") > 0) {
+                    const auto& school_highlight = edu_entry["school"];
+                    if (school_highlight.count("snippet") > 0) {
+                        std::string snippet = school_highlight["snippet"].get<std::string>();
+                        if (snippet.find("<mark>Harvard</mark>") != std::string::npos &&
+                            snippet.find("<mark>Business</mark>") != std::string::npos &&
+                            snippet.find("<mark>School</mark>") != std::string::npos) {
+                            matching_entries++;
+                            if (snippet == "<mark>Harvard</mark> <mark>Business</mark> <mark>School</mark>") {
+                                found_exact = true;
+                            } else if (snippet.find("Northwestern") != std::string::npos) {
+                                found_northwestern = true;
+                            } else if (snippet.find("Online") != std::string::npos) {
+                                found_online = true;
+                            }
+                            ASSERT_GE(school_highlight["matched_tokens"].size(), 3);
+                        }
+                    }
+                }
+            }
+            // Should have all 3 matching entries highlighted
+            ASSERT_EQ(matching_entries, 3) 
+                << "Document 6 should highlight all 3 matching entries";
+            ASSERT_TRUE(found_exact) << "Should highlight 'Harvard Business School'";
+            ASSERT_TRUE(found_northwestern) << "Should highlight 'Northwestern University & Harvard Business School'";
+            ASSERT_TRUE(found_online) << "Should highlight 'Harvard Business School Online'";
+            
+            // Should also have highlight for summary
+            bool found_summary = false;
+            if (results["hits"][i].count("highlights") > 0) {
+                for (const auto& highlight : results["hits"][i]["highlights"]) {
+                    if (highlight["field"].get<std::string>() == "summary") {
+                        found_summary = true;
+                        break;
+                    }
+                }
+            }
+            ASSERT_TRUE(found_summary) << "Document 6 should also have highlight for summary";
+            break;
+        }
+    }
+    ASSERT_TRUE(found_doc6);
+
+    collectionManager.drop_collection("coll1");
+}

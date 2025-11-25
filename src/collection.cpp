@@ -4,6 +4,8 @@
 #include <chrono>
 #include <unordered_set>
 #include <sstream>
+#include <algorithm>
+#include <map>
 #include <match_score.h>
 #include <string_utils.h>
 #include <art.h>
@@ -5138,14 +5140,144 @@ void Collection::highlight_result(const bool& enable_nested_fields, const std::v
             std::sort(match_indices[matched_index].match.offsets.begin(),
                       match_indices[matched_index].match.offsets.end());
         } else {
-            // array of object element indices will not match indexed offsets, so we will use dummy match
-            // the highlighting logic will ignore this and try to do exhaustive highlighting (look at all tokens)
-            match_indices.clear();
-            match_indices.push_back(match_index_t(Match(), 0, 0));
-            matched_index = 0;
+            // for nested fields within array of objects, we might still have valid match_indices
+            // if the nested field is a string array (like education.school). Try to find a match first.
+            if (!match_indices.empty() && array_i >= 0) {
+                for (size_t match_index = 0; match_index < match_indices.size(); match_index++) {
+                    if (match_indices[match_index].index == array_i) {
+                        matched_index = match_index;
+                        break;
+                    }
+                }
+            }
+            
+            
+            // if no match found, use dummy match for exhaustive highlighting
+            // but: for phrase queries, we should not highlight if there's no match
+            if (matched_index == -1) {
+                // for phrase queries, skip highlighting if no match found
+                if (!q_phrases.empty()) {
+                    h_obj = nlohmann::json::object();
+                    h_obj["snippet"] = "";
+                    h_obj["matched_tokens"] = nlohmann::json::array();
+                    return;
+                }
+                // for non-phrase queries, use dummy match for exhaustive highlighting
+                // array of object element indices will not match indexed offsets, so we will use dummy match
+                // the highlighting logic will ignore this and try to do exhaustive highlighting (look at all tokens)
+                match_indices.clear();
+                match_indices.push_back(match_index_t(Match(), 0, 0));
+                matched_index = 0;
+            } else {
+                // Sort the offsets for the matched index
+                std::sort(match_indices[matched_index].match.offsets.begin(),
+                          match_indices[matched_index].match.offsets.end());
+            }
         }
 
         const auto& match_index = match_indices[matched_index];
+        
+        highlight_t array_highlight = highlight;
+        std::string text = h_obj.get<std::string>();
+        
+        // for phrase queries, validate that the offsets make sense for this text
+        // the offsets should match tokens that actually exist in the current text
+        if (!q_phrases.empty()) {
+            if (match_index.match.offsets.empty()) {
+                // no offsets no match
+                h_obj = nlohmann::json::object();
+                h_obj["snippet"] = "";
+                h_obj["matched_tokens"] = nlohmann::json::array();
+                return;
+            }
+            
+            // this ensures offsets belong to this specific text, not a different array element
+            size_t max_offset = 0;
+            for (const auto& offset : match_index.match.offsets) {
+                if (offset.offset != MAX_DISPLACEMENT && offset.offset > max_offset) {
+                    max_offset = offset.offset;
+                }
+            }
+            
+            Tokenizer tokenizer(text, normalise, false, search_field.locale, symbols_to_index, token_separators, search_field.get_stemmer());
+            std::string dummy_token;
+            size_t dummy_index = 0, dummy_start = 0, dummy_end = 0;
+            size_t token_count = 0;
+            while(tokenizer.next(dummy_token, dummy_index, dummy_start, dummy_end)) {
+                token_count++;
+                if (dummy_index >= max_offset) {
+                    break;
+                }
+            }
+            
+            // for phrase queries if max_offset is >= token count the offsets don't belong to this text
+            // max_offset is a token index, if max_offset=2, at least 3 tokens (0,1,2) are needed
+            // this happens when match_index belongs to a different array element
+            // use >= because if max_offset=2 and we have 2 tokens (indices 0,1), offset 2 is invalid
+            if (max_offset >= token_count) {
+                // offsets don't match this text
+                h_obj = nlohmann::json::object();
+                h_obj["snippet"] = "";
+                h_obj["matched_tokens"] = nlohmann::json::array();
+                return;
+            }
+            
+            if (!q_phrases.empty() && !q_phrases[0].empty()) {
+                Tokenizer phrase_finder(text, normalise, false, search_field.locale, symbols_to_index, token_separators, search_field.get_stemmer());
+                std::string token;
+                size_t token_index = 0, token_start = 0, token_end = 0;
+                
+                std::vector<size_t> phrase_offsets;
+                size_t phrase_token_idx = 0;
+                
+                while(phrase_finder.next(token, token_index, token_start, token_end)) {
+                    std::string normalized_token = token;
+                    std::transform(normalized_token.begin(), normalized_token.end(), normalized_token.begin(), ::tolower);
+                    
+                    std::string normalized_phrase_token = q_phrases[0][phrase_token_idx];
+                    std::transform(normalized_phrase_token.begin(), normalized_phrase_token.end(), normalized_phrase_token.begin(), ::tolower);
+                    
+                    if (normalized_token == normalized_phrase_token) {
+                        // found a matching token
+                        phrase_offsets.push_back(token_index);
+                        phrase_token_idx++;
+                        
+                        if (phrase_token_idx >= q_phrases[0].size()) {
+                            break;
+                        }
+                    } else {
+                        phrase_offsets.clear();
+                        phrase_token_idx = 0;
+                        
+                        // check if current token matches first phrase token. might be start of new phrase
+                        if (normalized_token == normalized_phrase_token) {
+                            phrase_offsets.push_back(token_index);
+                            phrase_token_idx = 1;
+                        }
+                    }
+                }
+                
+                if (phrase_offsets.size() != q_phrases[0].size()) {
+                    h_obj = nlohmann::json::object();
+                    h_obj["snippet"] = "";
+                    h_obj["matched_tokens"] = nlohmann::json::array();
+                    return;
+                }
+                
+                match_indices[matched_index].match.offsets.clear();
+                for (size_t i = 0; i < phrase_offsets.size(); i++) {
+                    TokenOffset to;
+                    to.offset = phrase_offsets[i];
+                    to.offset_index = i;
+                    to.token_id = 0;
+                    match_indices[matched_index].match.offsets.push_back(to);
+                }
+                std::sort(match_indices[matched_index].match.offsets.begin(), 
+                         match_indices[matched_index].match.offsets.end());
+            }
+        }
+        
+        h_obj = nlohmann::json::object();
 
         size_t last_valid_offset = 0;
         int last_valid_offset_index = -1;
@@ -5160,10 +5292,7 @@ void Collection::highlight_result(const bool& enable_nested_fields, const std::v
             }
         }
 
-        highlight_t array_highlight = highlight;
-        std::string text = h_obj.get<std::string>();
-        h_obj = nlohmann::json::object();
-
+        
         handle_highlight_text(text, normalise, search_field, is_arr_obj_ele, symbols_to_index,
                               token_separators, array_highlight, string_utils, use_word_tokenizer,
                               highlight_affix_num_tokens,
@@ -5173,9 +5302,19 @@ void Collection::highlight_result(const bool& enable_nested_fields, const std::v
                               raw_query_tokens,
                               last_valid_offset, highlight_start_tag, highlight_end_tag,
                               index_symbols, match_index, raw_query, q_phrases);
+        
+        // Debug logging after highlighting for phrase queries
 
 
         if(array_highlight.snippets.empty() && array_highlight.values.empty()) {
+            // For phrase queries with no matches, return empty object
+            if (!q_phrases.empty() && array_highlight.matched_tokens.empty()) {
+                h_obj = nlohmann::json::object();
+                h_obj["snippet"] = "";
+                h_obj["matched_tokens"] = nlohmann::json::array();
+                return;
+            }
+            // For non-phrase queries or when we have matched tokens, create a plain snippet entry
             h_obj["snippet"] = text;
             h_obj["matched_tokens"] = nlohmann::json::array();
         }
@@ -5369,13 +5508,13 @@ bool Collection::handle_highlight_text(std::string& text, const bool& normalise,
         // objects have to be exhaustively looked for highlight tokens.
         // For a phrase query, we should be more restrictive and only highlight tokens that are part of
         // the actual phrase match, not just any token that appears in the query.
-        bool raw_token_found = !match_offset_found &&
-                                (highlight_fully || is_arr_obj_ele || text_len < snippet_threshold * 6) &&
-                                qtoken_leaves.find(raw_token) != qtoken_leaves.end();
-        
         bool is_phrase_query = !q_phrases.empty();
         
-        
+        // For phrase queries, NEVER allow raw_token_found - only highlight if there's a valid phrase match
+        bool raw_token_found = !is_phrase_query && 
+                               !match_offset_found &&
+                               (highlight_fully || is_arr_obj_ele || text_len < snippet_threshold * 6) &&
+                               qtoken_leaves.find(raw_token) != qtoken_leaves.end();
         
         // phrase query, only highlight tokens that are part of consecutive phrase matches
         if (is_phrase_query) {
@@ -5386,6 +5525,7 @@ bool Collection::handle_highlight_text(std::string& text, const bool& normalise,
                 for (const auto& offset : match.offsets) {
                     offset_indices.insert(offset.offset);
                 }
+                
                 if (offset_indices.count(raw_token_index) > 0) {
                     // check if the next token in the phrase is also in the match offsets
                     size_t next_token_index = raw_token_index + 1;
@@ -5400,6 +5540,11 @@ bool Collection::handle_highlight_text(std::string& text, const bool& normalise,
                             is_consecutive_phrase_match = true;
                         }
                     }
+                    
+                    // Debug logging for phrase matching decisions
+                    if (!is_consecutive_phrase_match) {
+                    }
+                } else {
                 }
                 
                 // this is not part of a consecutive phrase match, don't highlight it
@@ -5408,10 +5553,8 @@ bool Collection::handle_highlight_text(std::string& text, const bool& normalise,
                 }
             }
             
-            // phrase query, also disable raw_token_found to prevent highlighting individual tokens
-            if (raw_token_found && !match_offset_found) {
-                raw_token_found = false;
-            }
+            // For phrase queries, raw_token_found is already disabled above
+            // Only match_offset_found (for valid phrase matches) should be true
         }
 
         if (match_offset_found || raw_token_found) {
@@ -5509,6 +5652,7 @@ bool Collection::handle_highlight_text(std::string& text, const bool& normalise,
     }
 
     if(token_offsets.empty()) {
+        // Debug logging when no token offsets found
         return false;
     }
 
