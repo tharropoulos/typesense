@@ -5183,46 +5183,44 @@ void Collection::highlight_result(const bool& enable_nested_fields, const std::v
         // for phrase queries, validate that the offsets make sense for this text
         // the offsets should match tokens that actually exist in the current text
         if (!q_phrases.empty()) {
+            bool should_find_phrase = true;
+            
             if (match_index.match.offsets.empty()) {
-                // no offsets no match
-                h_obj = nlohmann::json::object();
-                h_obj["snippet"] = "";
-                h_obj["matched_tokens"] = nlohmann::json::array();
-                return;
-            }
-            
-            // this ensures offsets belong to this specific text, not a different array element
-            size_t max_offset = 0;
-            for (const auto& offset : match_index.match.offsets) {
-                if (offset.offset != MAX_DISPLACEMENT && offset.offset > max_offset) {
-                    max_offset = offset.offset;
+                // no offsets from Match constructor, but we should still try to find the phrase in the text
+            } else {
+                // this ensures offsets belong to this specific text, not a different array element
+                size_t max_offset = 0;
+                for (const auto& offset : match_index.match.offsets) {
+                    if (offset.offset != MAX_DISPLACEMENT && offset.offset > max_offset) {
+                        max_offset = offset.offset;
+                    }
+                }
+                
+                Tokenizer tokenizer(text, normalise, false, search_field.locale, symbols_to_index, token_separators, search_field.get_stemmer());
+                std::string dummy_token;
+                size_t dummy_index = 0, dummy_start = 0, dummy_end = 0;
+                size_t token_count = 0;
+                while(tokenizer.next(dummy_token, dummy_index, dummy_start, dummy_end)) {
+                    token_count++;
+                    if (dummy_index >= max_offset) {
+                        break;
+                    }
+                }
+                
+                // for phrase queries if max_offset is >= token count the offsets don't belong to this text
+                // max_offset is a token index, if max_offset=2, at least 3 tokens (0,1,2) are needed
+                // this happens when match_index belongs to a different array element
+                // use >= because if max_offset=2 and we have 2 tokens (indices 0,1), offset 2 is invalid
+                if (max_offset >= token_count) {
+                    // offsets don't match this text, but we should still try to find the phrase
+                } else {
+                    // offsets are valid, but we'll still search for the phrase to ensure we get the right location
+                    should_find_phrase = true;
                 }
             }
             
-            Tokenizer tokenizer(text, normalise, false, search_field.locale, symbols_to_index, token_separators, search_field.get_stemmer());
-            std::string dummy_token;
-            size_t dummy_index = 0, dummy_start = 0, dummy_end = 0;
-            size_t token_count = 0;
-            while(tokenizer.next(dummy_token, dummy_index, dummy_start, dummy_end)) {
-                token_count++;
-                if (dummy_index >= max_offset) {
-                    break;
-                }
-            }
-            
-            // for phrase queries if max_offset is >= token count the offsets don't belong to this text
-            // max_offset is a token index, if max_offset=2, at least 3 tokens (0,1,2) are needed
-            // this happens when match_index belongs to a different array element
-            // use >= because if max_offset=2 and we have 2 tokens (indices 0,1), offset 2 is invalid
-            if (max_offset >= token_count) {
-                // offsets don't match this text
-                h_obj = nlohmann::json::object();
-                h_obj["snippet"] = "";
-                h_obj["matched_tokens"] = nlohmann::json::array();
-                return;
-            }
-            
-            if (!q_phrases.empty() && !q_phrases[0].empty()) {
+            // Always try to find the phrase in the text, regardless of Match constructor offsets
+            if (should_find_phrase && !q_phrases.empty() && !q_phrases[0].empty()) {
                 Tokenizer phrase_finder(text, normalise, false, search_field.locale, symbols_to_index, token_separators, search_field.get_stemmer());
                 std::string token;
                 size_t token_index = 0, token_start = 0, token_end = 0;
@@ -5250,7 +5248,9 @@ void Collection::highlight_result(const bool& enable_nested_fields, const std::v
                         phrase_token_idx = 0;
                         
                         // check if current token matches first phrase token. might be start of new phrase
-                        if (normalized_token == normalized_phrase_token) {
+                        std::string normalized_first_phrase_token = q_phrases[0][0];
+                        std::transform(normalized_first_phrase_token.begin(), normalized_first_phrase_token.end(), normalized_first_phrase_token.begin(), ::tolower);
+                        if (normalized_token == normalized_first_phrase_token) {
                             phrase_offsets.push_back(token_index);
                             phrase_token_idx = 1;
                         }
