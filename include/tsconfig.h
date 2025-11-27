@@ -99,6 +99,8 @@ private:
 
     uint32_t max_indexing_concurrency;
 
+    uint32_t http_connection_timeout_ms;
+
 protected:
 
     Config() {
@@ -150,6 +152,8 @@ protected:
         this->db_keep_log_file_num = 5;
 
         this->max_indexing_concurrency = 4;
+
+        this->http_connection_timeout_ms = 4000;
     }
 
     Config(Config const&) {
@@ -215,6 +219,10 @@ public:
 
     void set_max_indexing_concurrency(uint32_t val) {
         this->max_indexing_concurrency = val;
+    }
+
+    void set_http_connection_timeout_ms(uint32_t val) {
+        this->http_connection_timeout_ms = val;
     }
 
     // @deprecated
@@ -517,6 +525,10 @@ public:
 
     uint32_t get_max_indexing_concurrency() const {
         return this->max_indexing_concurrency;
+    }
+
+    uint32_t get_http_connection_timeout_ms() const {
+        return this->http_connection_timeout_ms;
     }
 
     // loaders

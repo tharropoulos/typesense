@@ -7,6 +7,7 @@
 
 std::string HttpClient::api_key = "";
 std::string HttpClient::ca_cert_path = "";
+uint32_t HttpClient::connection_timeout_ms = 4000;
 
 struct client_state_t: public req_state_t {
     CURL* curl;
@@ -178,8 +179,10 @@ long HttpClient::get_response(const std::string &url, std::string &response,
     return perform_curl(curl, res_headers, chunk, send_ts_api_header);
 }
 
-void HttpClient::init(const std::string &api_key) {
+void HttpClient::init(const std::string &api_key, uint32_t connection_timeout_ms) {
     HttpClient::api_key = api_key;
+    HttpClient::connection_timeout_ms = connection_timeout_ms;
+    LOG(INFO) << "HttpClient initialized with connection_timeout_ms: " << connection_timeout_ms;
 
     // try to locate ca cert file (from: https://serverfault.com/a/722646/117601)
     std::vector<std::string> locations = {
@@ -443,7 +446,7 @@ CURL *HttpClient::init_curl_stream(const std::string& url, async_stream_response
 
 
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 4000);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, connection_timeout_ms);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms);
     curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE);
 
@@ -482,7 +485,7 @@ CURL *HttpClient::init_curl_sse(const std::string& url, long timeout_ms,
 
 
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 4000);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, connection_timeout_ms);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms);
     curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE);
 
@@ -537,7 +540,7 @@ CURL *HttpClient::init_curl_async(const std::string& url, deferred_req_res_t* re
     }
 
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 4000);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, connection_timeout_ms);
 
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "Typesense/1.0");
 
@@ -571,7 +574,7 @@ CURL *HttpClient::init_curl(const std::string& url, std::string& response, const
     }
 
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 4000);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, connection_timeout_ms);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms);
     curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE);
 
@@ -613,7 +616,7 @@ long HttpClient::download_file(const std::string& url, const std::string& file_p
     }
 
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 4000);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, connection_timeout_ms);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
 
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);

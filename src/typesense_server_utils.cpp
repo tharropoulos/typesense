@@ -134,6 +134,7 @@ void init_cmdline_options(cmdline::parser & options, int argc, char **argv) {
     options.add<uint32_t>("db-max-log-file-size", '\0', "rocksdb max logfile size.", false);
     options.add<uint32_t>("db-keep-log-file-num", '\0', "rocksdb number of log files to keep.", false);
     options.add<uint32_t>("max-indexing-concurrency", '\0', "maximum concurrency for batch indexing docs.", false);
+    options.add<uint32_t>("http-connection-timeout-ms", '\0', "Timeout in milliseconds for establishing HTTP connections (TCP + SSL handshake).", false, 4000);
 
     // DEPRECATED
     options.add<std::string>("listen-address", 'h', "[DEPRECATED: use `api-address`] Address to which Typesense API service binds.", false, "0.0.0.0");
@@ -576,7 +577,7 @@ int run_server(const Config & config, const std::string & version, void (*master
 
     curl_global_init(CURL_GLOBAL_SSL);
     HttpClient & httpClient = HttpClient::get_instance();
-    httpClient.init(config.get_api_key());
+    httpClient.init(config.get_api_key(), config.get_http_connection_timeout_ms());
 
     server = new HttpServer(
         version,

@@ -13,6 +13,7 @@ class HttpClient {
 private:
     static std::string api_key;
     static std::string ca_cert_path;
+    static uint32_t connection_timeout_ms;
 
     HttpClient() = default;
 
@@ -54,7 +55,7 @@ public:
     HttpClient(HttpClient const&) = delete;
     void operator=(HttpClient const&) = delete;
 
-    void init(const std::string & api_key);
+    void init(const std::string & api_key, uint32_t connection_timeout_ms = 4000);
 
     static long download_file(const std::string& url, const std::string& file_path);
 
