@@ -3570,7 +3570,7 @@ TEST_F(CollectionFacetingTest, RangeFacetAlphanumericLabels) {
     ASSERT_EQ("10thAD", results["facet_counts"][0]["counts"][2]["value"]);
 }
 
-TEST_F(CollectionFacetingTest, FacetingWithCoercedString) {
+TEST_F(CollectionFacetingTest, FacetingRejectsCoercedStringAlter) {
     std::vector<field> fields = {field("years", field_types::INT64_ARRAY, true)};
 
     Collection* coll1 = collectionManager.create_collection(
@@ -3589,15 +3589,11 @@ TEST_F(CollectionFacetingTest, FacetingWithCoercedString) {
         ]
     })"_json;
 
-    // schema change will not change the data on disk, so we have to account for this during hash based faceting
     auto alter_op = coll1->alter(schema_changes);
-    ASSERT_TRUE(alter_op.ok());
-
-    auto results = coll1->search("*", {}, "", {"years"}, {}, {2}, 10,
-                                 1, FREQUENCY, {true}).get();
-
-    ASSERT_EQ(3, results["facet_counts"][0]["counts"].size());
-    ASSERT_EQ(1, results["facet_counts"][0]["counts"][0]["count"]);
+    ASSERT_FALSE(alter_op.ok());
+    ASSERT_EQ("Schema change is incompatible with the type of documents already stored in this collection. "
+              "Existing data for field `years` is not already an array of string. Alter does not rewrite stored documents.",
+              alter_op.error());
 }
 
 TEST_F(CollectionFacetingTest, RangeFacetsWithSortDisabled) {

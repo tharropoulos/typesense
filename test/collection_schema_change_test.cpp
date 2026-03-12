@@ -445,7 +445,7 @@ TEST_F(CollectionSchemaChangeTest, AlterValidations) {
     alter_op = coll1->alter(schema_changes);
     ASSERT_FALSE(alter_op.ok());
     ASSERT_EQ("Schema change is incompatible with the type of documents already stored in this collection. "
-              "Existing data for field `desc` cannot be coerced into an int32.", alter_op.error());
+              "Existing data for field `desc` is not already an int32. Alter does not rewrite stored documents.", alter_op.error());
 
     // 6. Prevent non-optional field when on-disk data has missing values
     doc.clear();
@@ -534,7 +534,8 @@ TEST_F(CollectionSchemaChangeTest, AbilityToDropAndReAddIndexAtTheSameTime) {
         "name": "coll1",
         "fields": [
             {"name": "title", "type": "string"},
-            {"name": "timestamp", "type": "int32"}
+            {"name": "timestamp", "type": "int32"},
+            {"name": "rating", "type": "float", "optional": true}
         ]
     })"_json;
 
@@ -547,6 +548,7 @@ TEST_F(CollectionSchemaChangeTest, AbilityToDropAndReAddIndexAtTheSameTime) {
     doc["id"] = "0";
     doc["title"] = "Hello";
     doc["timestamp"] = 3433232;
+    doc["rating"] = 4.5;
 
     ASSERT_TRUE(coll1->add(doc.dump()).ok());
 
@@ -562,7 +564,7 @@ TEST_F(CollectionSchemaChangeTest, AbilityToDropAndReAddIndexAtTheSameTime) {
     auto alter_op = coll1->alter(schema_changes);
     ASSERT_FALSE(alter_op.ok());
     ASSERT_EQ("Schema change is incompatible with the type of documents already stored in this collection. "
-              "Existing data for field `title` cannot be coerced into an int32.", alter_op.error());
+              "Existing data for field `title` is not already an int32. Alter does not rewrite stored documents.", alter_op.error());
 
     // existing data should not have been touched
     auto res = coll1->search("he", {"title"}, "", {}, {}, {0}, 10, 1, FREQUENCY, {true}, 10).get();
@@ -590,6 +592,22 @@ TEST_F(CollectionSchemaChangeTest, AbilityToDropAndReAddIndexAtTheSameTime) {
     ASSERT_EQ("title", res["facet_counts"][0]["field_name"]);
     ASSERT_EQ(1, res["facet_counts"][0]["counts"].size());
     ASSERT_EQ("Hello", res["facet_counts"][0]["counts"][0]["value"].get<std::string>());
+
+    schema_changes = R"({
+        "fields": [
+            {"name": "rating", "drop": true},
+            {"name": "rating", "type": "int32"}
+        ]
+    })"_json;
+
+    alter_op = coll1->alter(schema_changes);
+    ASSERT_FALSE(alter_op.ok());
+    ASSERT_EQ("Schema change is incompatible with the type of documents already stored in this collection. "
+              "Existing data for field `rating` is not already an int32. Alter does not rewrite stored documents.", alter_op.error());
+
+    auto get_doc_op = coll1->get("0");
+    ASSERT_TRUE(get_doc_op.ok());
+    ASSERT_TRUE(get_doc_op.get()["rating"].is_number_float());
 
     // migrate int32 to int64
     schema_changes = R"({
@@ -693,7 +711,7 @@ TEST_F(CollectionSchemaChangeTest, AddAndDropFieldImmediately) {
     alter_op = coll1->alter(schema_changes);
     ASSERT_FALSE(alter_op.ok());
     ASSERT_EQ("Schema change is incompatible with the type of documents already stored in this collection. "
-              "Existing data for field `some_txt` cannot be coerced into an int32.", alter_op.error());
+              "Existing data for field `some_txt` is not already an int32. Alter does not rewrite stored documents.", alter_op.error());
 
     ASSERT_EQ(2, coll1->get_schema().size());
     ASSERT_EQ(2, coll1->get_fields().size());
@@ -839,7 +857,7 @@ TEST_F(CollectionSchemaChangeTest, DropFieldNotExistingInDocuments) {
     ASSERT_TRUE(alter_op.ok());
 }
 
-TEST_F(CollectionSchemaChangeTest, ChangeFieldToCoercableTypeIsAllowed) {
+TEST_F(CollectionSchemaChangeTest, ChangeFieldToCoercableTypeIsRejected) {
     // optional title field
     std::vector<field> fields = {field("title", field_types::STRING, false, true, true, "", 1, 1),
                                  field("points", field_types::INT32, true),};
@@ -852,7 +870,7 @@ TEST_F(CollectionSchemaChangeTest, ChangeFieldToCoercableTypeIsAllowed) {
 
     ASSERT_TRUE(coll1->add(doc.dump()).ok());
 
-    // coerce field from int to string
+    // changing the field type would require rewriting stored documents, which alter does not do
     auto schema_changes = R"({
         "fields": [
             {"name": "points", "drop": true},
@@ -861,7 +879,13 @@ TEST_F(CollectionSchemaChangeTest, ChangeFieldToCoercableTypeIsAllowed) {
     })"_json;
 
     auto alter_op = coll1->alter(schema_changes);
-    ASSERT_TRUE(alter_op.ok());
+    ASSERT_FALSE(alter_op.ok());
+    ASSERT_EQ("Schema change is incompatible with the type of documents already stored in this collection. "
+              "Existing data for field `points` is not already a string. Alter does not rewrite stored documents.", alter_op.error());
+
+    auto get_op = coll1->get("0");
+    ASSERT_TRUE(get_op.ok());
+    ASSERT_TRUE(get_op.get()["points"].is_number_integer());
 }
 
 TEST_F(CollectionSchemaChangeTest, ChangeFromPrimitiveToDynamicField) {
@@ -1243,7 +1267,7 @@ TEST_F(CollectionSchemaChangeTest, DropIntegerFieldAndAddStringValues) {
     alter_op = coll1->alter(schema_changes);
     ASSERT_FALSE(alter_op.ok());
     ASSERT_EQ("Schema change is incompatible with the type of documents already stored in this collection. "
-              "Existing data for field `label` cannot be coerced into an int64.", alter_op.error());
+              "Existing data for field `label` is not already an int64. Alter does not rewrite stored documents.", alter_op.error());
 
     // but should allow the problematic field to be dropped
     schema_changes = R"({

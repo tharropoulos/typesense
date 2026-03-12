@@ -7489,6 +7489,14 @@ Option<bool> Collection::validate_alter_payload(nlohmann::json& schema_changes,
         return Option<bool>(400, "There can be only one field named `.*`.");
     }
 
+    tsl::htrie_map<char, field> strict_reindex_schema;
+    for(const auto& reindex_field : reindex_fields) {
+        auto updated_field_it = updated_search_schema.find(reindex_field.name);
+        if(updated_field_it != updated_search_schema.end()) {
+            strict_reindex_schema[reindex_field.name] = updated_field_it.value();
+        }
+    }
+
     // data validations: here we ensure that already stored data is compatible with requested schema changes
     const std::string seq_id_prefix = get_seq_id_collection_prefix();
     std::string upper_bound_key = get_seq_id_collection_prefix() + "`";  // cannot inline this
@@ -7510,6 +7518,34 @@ Option<bool> Collection::validate_alter_payload(nlohmann::json& schema_changes,
         } catch(const std::exception& e) {
             return Option<bool>(400, "Bad JSON in document: " + document.dump(-1, ' ', false,
                                                                                 nlohmann::detail::error_handler_t::ignore));
+        }
+
+        if(!strict_reindex_schema.empty()) {
+            auto strict_document = document;
+            auto strict_validate_op = validator_t::validate_index_in_memory(strict_document, seq_id, "",
+                                                                            strict_reindex_schema,
+                                                                            {},
+                                                                            index_operation_t::CREATE,
+                                                                            false,
+                                                                            fallback_field_type,
+                                                                            DIRTY_VALUES::REJECT,
+                                                                            false);
+            if(!strict_validate_op.ok()) {
+                std::string err_message = strict_validate_op.error();
+                if(err_message.find("must be") != std::string::npos) {
+                    std::string type_error = "Schema change is incompatible with the type of documents already stored "
+                                             "in this collection.";
+                    std::vector<std::string> err_parts;
+                    StringUtils::split(err_message, err_parts, "must be");
+                    if(err_parts.size() == 2) {
+                        err_parts[0][0] = std::tolower(err_parts[0][0]);
+                        type_error += " Existing data for " + err_parts[0] + " is not already " + err_parts[1] +
+                                      " Alter does not rewrite stored documents.";
+                    }
+
+                    return Option<bool>(strict_validate_op.code(), type_error);
+                }
+            }
         }
 
         if(!fallback_field_type.empty() || !new_dynamic_fields.empty() || !updated_nested_fields.empty()) {
@@ -7578,7 +7614,8 @@ Option<bool> Collection::validate_alter_payload(nlohmann::json& schema_changes,
                 StringUtils::split(err_message, err_parts, "must be");
                 if(err_parts.size() == 2) {
                     err_parts[0][0] = std::tolower(err_parts[0][0]);
-                    type_error += " Existing data for " + err_parts[0] + " cannot be coerced into " + err_parts[1];
+                    type_error += " Existing data for " + err_parts[0] + " is not already " + err_parts[1] +
+                                  " Alter does not rewrite stored documents.";
                 }
 
                 return Option<bool>(validate_op.code(), type_error);
