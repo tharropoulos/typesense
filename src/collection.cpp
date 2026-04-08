@@ -5365,10 +5365,10 @@ bool Collection::handle_highlight_text(std::string& text, const bool& normalise,
         text = string_utils.unicode_nfkd(text);
     }
 
-    // special handling for phrase queries in nested array fields (array of objects)
-    // when is_arr_obj_ele is true, match.offsets is empty, so we need to manually check for phrase matches
+    // Special handling for phrase queries: use the actual token sequence in the text so we only
+    // highlight tokens that belong to the phrase in order, not just any nearby matched offsets.
     bool is_phrase_query = !q_phrases.empty();
-    if (is_phrase_query && is_arr_obj_ele && match.offsets.empty() && !text.empty()) {
+    if (is_phrase_query && !text.empty()) {
         struct TextToken {
             std::string token;
             size_t token_index;
