@@ -5598,6 +5598,35 @@ bool Collection::handle_highlight_text(std::string& text, const bool& normalise,
     }
 
     size_t valid_phrase_range_idx = 0;
+    if(is_phrase_query) {
+        std::stringstream dbg;
+        dbg << "phrase highlight debug raw_query=\"" << raw_query << "\" text=\"" << text << "\"";
+        dbg << " q_phrases=[";
+        for(size_t i = 0; i < q_phrases.size(); i++) {
+            if(i > 0) {
+                dbg << "; ";
+            }
+            dbg << "[";
+            for(size_t j = 0; j < q_phrases[i].size(); j++) {
+                if(j > 0) {
+                    dbg << " ";
+                }
+                dbg << q_phrases[i][j];
+            }
+            dbg << "]";
+        }
+        dbg << "] match.offsets=[";
+        for(size_t i = 0; i < match.offsets.size(); i++) {
+            if(i > 0) {
+                dbg << ", ";
+            }
+            dbg << "(" << int(match.offsets[i].token_id) << ":" << match.offsets[i].offset
+                << ":" << match.offsets[i].offset_index << ")";
+        }
+        dbg << "]";
+        LOG(INFO) << dbg.str();
+    }
+
     while(tokenizer.next(raw_token, raw_token_index, tok_start, tok_end)) {
         if(use_word_tokenizer) {
             bool found_token = word_tokenizer.tokenize(raw_token);
@@ -5664,6 +5693,13 @@ bool Collection::handle_highlight_text(std::string& text, const bool& normalise,
         }
 
         if (match_offset_found || raw_token_found) {
+            if(is_phrase_query) {
+                LOG(INFO) << "phrase highlight selected raw_token_index=" << raw_token_index
+                          << " raw_token=\"" << raw_token << "\" match_offset_found=" << match_offset_found
+                          << " raw_token_found=" << raw_token_found
+                          << " match_offset_index=" << match_offset_index
+                          << " valid_phrase_range_idx=" << valid_phrase_range_idx;
+            }
             if(qtoken_it != qtoken_leaves.end() && qtoken_it.value().is_prefix &&
                qtoken_it.value().root_len < raw_token.size()) {
                 // need to ensure that only the prefix portion is highlighted
@@ -5768,6 +5804,27 @@ bool Collection::handle_highlight_text(std::string& text, const bool& normalise,
 
     if(token_offsets.empty()) {
         return false;
+    }
+
+    if(is_phrase_query) {
+        std::stringstream dbg;
+        dbg << "phrase highlight token_offsets=[";
+        for(auto it = token_offsets.begin(); it != token_offsets.end(); ++it) {
+            if(it != token_offsets.begin()) {
+                dbg << ", ";
+            }
+            dbg << "(" << it->first << "," << it->second << ")";
+        }
+        dbg << "] valid_phrase_ranges=[";
+        for(size_t i = 0; i < valid_phrase_ranges.size(); i++) {
+            if(i > 0) {
+                dbg << ", ";
+            }
+            dbg << "(" << valid_phrase_ranges[i].first << "," << valid_phrase_ranges[i].second << ")";
+        }
+        dbg << "] snippet_start_offset=" << snippet_start_offset
+            << " snippet_end_offset=" << snippet_end_offset;
+        LOG(INFO) << dbg.str();
     }
 
     if(snippet_threshold > 0 && raw_token_index < snippet_threshold) {
