@@ -5365,10 +5365,94 @@ bool Collection::handle_highlight_text(std::string& text, const bool& normalise,
         text = string_utils.unicode_nfkd(text);
     }
 
+    bool is_phrase_query = !q_phrases.empty();
+    bool use_exact_phrase_highlight = is_phrase_query && is_arr_obj_ele && match.offsets.empty();
+    if(is_phrase_query && !use_exact_phrase_highlight && !match.offsets.empty() && !text.empty()) {
+        struct TextToken {
+            std::string token;
+            size_t token_index;
+            size_t tok_start;
+            size_t tok_end;
+        };
+
+        std::vector<TextToken> text_tokens;
+        Tokenizer text_tokenizer(text, normalise, false, search_field.locale, symbols_to_index, token_separators, search_field.get_stemmer());
+        Tokenizer text_word_tokenizer("", true, false, search_field.locale, symbols_to_index, token_separators, search_field.get_stemmer());
+
+        std::string token;
+        size_t token_index = 0, tok_start = 0, tok_end = 0;
+        while(text_tokenizer.next(token, token_index, tok_start, tok_end)) {
+            if(use_word_tokenizer) {
+                bool found_token = text_word_tokenizer.tokenize(token);
+                if(!found_token) {
+                    text_tokenizer.decr_token_counter();
+                    continue;
+                }
+            }
+            text_tokens.push_back({token, token_index, tok_start, tok_end});
+        }
+
+        std::unordered_map<std::string, std::vector<std::vector<std::string>>> phrases_by_first_token;
+        for(const auto& phrase : q_phrases) {
+            if(phrase.empty()) {
+                continue;
+            }
+
+            std::vector<std::string> phrase_lower;
+            phrase_lower.reserve(phrase.size());
+            for(const auto& token : phrase) {
+                std::string token_lower = token;
+                StringUtils::tolowercase(token_lower);
+                phrase_lower.push_back(token_lower);
+            }
+
+            phrases_by_first_token[phrase_lower[0]].push_back(phrase_lower);
+        }
+
+        bool found_exact_phrase = false;
+        size_t exact_phrase_first_token_idx = 0;
+        for(size_t i = 0; i < text_tokens.size() && !found_exact_phrase; i++) {
+            std::string first_token_lower = text_tokens[i].token;
+            StringUtils::tolowercase(first_token_lower);
+
+            auto phrases_it = phrases_by_first_token.find(first_token_lower);
+            if(phrases_it == phrases_by_first_token.end()) {
+                continue;
+            }
+
+            for(const auto& phrase : phrases_it->second) {
+                if(i + phrase.size() > text_tokens.size()) {
+                    continue;
+                }
+
+                bool phrase_matches = true;
+                for(size_t j = 0; j < phrase.size(); j++) {
+                    std::string text_token_lower = text_tokens[i + j].token;
+                    StringUtils::tolowercase(text_token_lower);
+                    if(text_token_lower != phrase[j]) {
+                        phrase_matches = false;
+                        break;
+                    }
+                }
+
+                if(phrase_matches) {
+                    found_exact_phrase = true;
+                    exact_phrase_first_token_idx = i;
+                    break;
+                }
+            }
+        }
+
+        if(found_exact_phrase && exact_phrase_first_token_idx != match.offsets.front().offset) {
+            use_exact_phrase_highlight = true;
+            LOG(INFO) << "phrase highlight fallback to exact scan: first_exact_token_index="
+                      << exact_phrase_first_token_idx << " first_match_offset=" << match.offsets.front().offset;
+        }
+    }
+
     // Special handling for phrase queries: use the actual token sequence in the text so we only
     // highlight tokens that belong to the phrase in order, not just any nearby matched offsets.
-    bool is_phrase_query = !q_phrases.empty();
-    if (is_phrase_query && !text.empty()) {
+    if (use_exact_phrase_highlight && !text.empty()) {
         struct TextToken {
             std::string token;
             size_t token_index;
