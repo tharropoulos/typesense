@@ -123,7 +123,7 @@ jobs:
           fi
 
       - name: Install gdb for hang diagnostics
-        run: sudo apt-get install -y gdb
+        run: sudo apt-get update && sudo apt-get install -y gdb
 
       - name: Make binary executable
         run: chmod +x ./typesense-server-binary/typesense-server
