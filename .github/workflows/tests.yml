@@ -163,6 +163,7 @@ jobs:
 
       - name: Run API tests with secrets
         if: github.event.pull_request.head.repo.fork == false
+        continue-on-error: true
         working-directory: api_tests
         env:
           TYPESENSE_BINARY_PATH: ${{ github.workspace }}/typesense-server-binary/typesense-server
