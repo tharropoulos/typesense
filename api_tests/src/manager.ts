@@ -1,4 +1,4 @@
-import { rmSync, mkdirSync, existsSync, writeFileSync } from "node:fs";
+import { rmSync, mkdirSync, existsSync, writeFileSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { env } from "bun";
 import { networkInterfaces } from "node:os";
@@ -161,8 +161,54 @@ export class TypesenseProcessManager {
     const instance = this.processes.get(name);
     if (!instance) return;
     instance.process.kill("SIGINT");
-    await instance.process.exited;
+    const timedOut = await Promise.race([
+      instance.process.exited.then(() => false),
+      new Promise<boolean>((r) => setTimeout(() => r(true), 60000)),
+    ]);
+    if (timedOut) {
+      await this.diagnoseStuckServer(instance);
+    }
     this.processes.delete(name);
+  }
+
+  // test-only diagnostics for the shutdown hang
+  private async diagnoseStuckServer(instance: ServerInstance) {
+    const pid = instance.process.pid;
+    console.error(`[diag] ${instance.name} (pid ${pid}) still running 60s after SIGINT`);
+    try {
+      for (const tid of readdirSync(`/proc/${pid}/task`)) {
+        const wchan = readFileSync(`/proc/${pid}/task/${tid}/wchan`, "utf8");
+        console.error(`[diag] tid ${tid} wchan=${wchan}`);
+      }
+    } catch (e) {
+      console.error(`[diag] could not read /proc: ${e}`);
+    }
+
+    const btPath = join(this.baseDir, "logs", `${instance.name}-backtraces.txt`);
+    const gdb = Bun.spawnSync(
+      ["sudo", "gdb", "-p", String(pid), "-batch", "-ex", "set pagination off", "-ex", "thread apply all bt"],
+      { stdout: Bun.file(btPath), stderr: "pipe" },
+    );
+    console.error(`[diag] ${instance.name} backtraces written to ${btPath} (gdb exit ${gdb.exitCode})`);
+    const main = readFileSync(btPath, "utf8").split("\nThread ").find((t) => t.startsWith("1 "));
+    console.error(`[diag] ${instance.name} main thread:\nThread ${main ?? "(not found)"}`);
+
+    const stderrText = new Response(instance.process.stderr as ReadableStream).text();
+    const stdoutText = new Response(instance.process.stdout as ReadableStream).text();
+    const exitedAfterDrain = await Promise.race([
+      instance.process.exited.then(() => true),
+      new Promise<boolean>((r) => setTimeout(() => r(false), 30000)),
+    ]);
+    console.error(`[diag] ${instance.name} exited after draining pipes: ${exitedAfterDrain}`);
+
+    if (!exitedAfterDrain) {
+      instance.process.kill("SIGKILL");
+      await instance.process.exited;
+    }
+    const stderr = await stderrText;
+    const stdout = await stdoutText;
+    console.error(`[diag] ${instance.name} stderr ${stderr.length} bytes, tail:\n${stderr.slice(-3000)}`);
+    console.error(`[diag] ${instance.name} stdout ${stdout.length} bytes, tail:\n${stdout.slice(-1000)}`);
   }
 
   async restartSingleNode() {

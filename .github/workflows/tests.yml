@@ -122,6 +122,9 @@ jobs:
             mkdir -p ./hf_cache
           fi
 
+      - name: Install gdb for hang diagnostics
+        run: sudo apt-get install -y gdb
+
       - name: Make binary executable
         run: chmod +x ./typesense-server-binary/typesense-server
 
@@ -183,6 +186,14 @@ jobs:
           TYPESENSE_DATA_DIR: ${{ github.workspace }}/tmp/test
           OPEN_AI_API_KEY: ""
         run: typesense-api-tests --no-secrets
+
+      - name: Upload server logs for hang diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: api-tests-server-logs
+          path: ${{ github.workspace }}/tmp/test/logs
+          if-no-files-found: warn
 
       - name: Cleanup TEI Container
         if: always()
