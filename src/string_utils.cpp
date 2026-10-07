@@ -475,4 +475,4 @@ size_t StringUtils::split_facet(const std::string &s, std::vector<std::string> &
 
 size_t StringUtils::get_occurence_count(const std::string &str, char symbol) {
     return std::count(str.begin(), str.end(), symbol);
-}
+}// ci prune test a
