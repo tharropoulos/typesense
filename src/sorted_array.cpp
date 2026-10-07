@@ -401,3 +401,4 @@ void sorted_array::binary_count_indices(const uint32_t *values, int low_vindex, 
 uint32_t sorted_array::last() {
     return (length == 0) ? UINT32_MAX : max;
 }
+// ci cache test
