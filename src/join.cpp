@@ -1244,10 +1244,9 @@ Option<bool> Join::initialize_ref_include_exclude_fields_vec(const std::string& 
     return Option<bool>(true);
 }
 
-// If joins to the same collection are found in both `embedded_filter` and `query_filter`, remove the join from
-// `embedded_filter` and merge its join condition with the `query_filter` join in the following manner:
-// `$JoinCollectionName((<embedded_join_condition>) && <query_join_condition>)`
-bool Join::merge_join_conditions(string& embedded_filter, string& query_filter) {
+// sets `skip_merge` when a join pair cannot be merged without changing what either filter allows, the caller then
+// keeps both filters intact and they are joined with `&&` as a whole
+static bool merge_join_conditions_in_place(std::string& embedded_filter, std::string& query_filter, bool& skip_merge) {
     std::unordered_map<std::string, std::string> coll_name_to_embedded_join;
     for (size_t i = 0; i < embedded_filter.size();) {
         auto const result = skip_index_to_join(embedded_filter, i);
@@ -1277,6 +1276,12 @@ bool Join::merge_join_conditions(string& embedded_filter, string& query_filter) 
         return true;
     }
 
+    std::set<std::string> required_embedded_joins, required_query_joins;
+    if (!filter::get_required_joins(embedded_filter, required_embedded_joins).ok() ||
+        !filter::get_required_joins(query_filter, required_query_joins).ok()) {
+        return false;
+    }
+
     std::set<std::string> query_join_coll_names;
     for (size_t i = 0; i < query_filter.size();) {
         auto const result = skip_index_to_join(query_filter, i);
@@ -1287,16 +1292,23 @@ bool Join::merge_join_conditions(string& embedded_filter, string& query_filter) 
         }
 
         // Merge join conditions
-        auto const& join_start_index = i;
-        auto const q_parenthesis_pos = query_filter.find('(', i + 1);
+        auto const is_negate_join = query_filter[i] == '!';
+        auto const name_start_index = i + 1 + is_negate_join;
+        auto const q_parenthesis_pos = query_filter.find('(', name_start_index);
         if (q_parenthesis_pos == std::string::npos) {
             return false;
         }
 
-        auto ref_coll_name = query_filter.substr(join_start_index + 1, q_parenthesis_pos - join_start_index - 1);
+        auto ref_coll_name = query_filter.substr(name_start_index, q_parenthesis_pos - name_start_index);
         StringUtils::trim(ref_coll_name);
         if (query_join_coll_names.find(ref_coll_name) != query_join_coll_names.end()) {
-            // Multiple joins to the same collection found.
+            // another join to an already merged collection, the merged condition would not cover it
+            skip_merge = true;
+            return true;
+        }
+
+        std::string join;
+        if (!parse_reference_filter_helper(query_filter, i, ref_coll_name, join).ok()) {
             return false;
         }
 
@@ -1304,20 +1316,28 @@ bool Join::merge_join_conditions(string& embedded_filter, string& query_filter) 
         if (it != coll_name_to_embedded_join.end()) {
             auto const& embedded_join = it->second;
 
+            // a negated or optional join on either side cannot carry the embedded condition
+            if (is_negate_join || embedded_join[0] == '!' ||
+                required_embedded_joins.find(ref_coll_name) == required_embedded_joins.end() ||
+                required_query_joins.find(ref_coll_name) == required_query_joins.end()) {
+                skip_merge = true;
+                return true;
+            }
+
             auto const e_parenthesis_pos = embedded_join.find('(');
             if (e_parenthesis_pos == std::string::npos) {
                 return false;
             }
             auto const embedded_join_condition = embedded_join.substr(e_parenthesis_pos + 1,
                                                                       embedded_join.size() - e_parenthesis_pos - 2);
-            query_filter.insert(q_parenthesis_pos + 1, ("(" + embedded_join_condition + ") && "));
+
+            // i is past the closing parenthesis of the query join, wrap the query condition before prepending
+            auto const prefix = "(" + embedded_join_condition + ") && (";
+            query_filter.insert(i - 1, ")");
+            query_filter.insert(q_parenthesis_pos + 1, prefix);
+            i += 1 + prefix.size();
 
             query_join_coll_names.insert(ref_coll_name);
-        }
-
-        std::string join;
-        if (!parse_reference_filter_helper(query_filter, i, ref_coll_name, join).ok()) {
-            return false;
         }
     }
 
@@ -1420,5 +1440,24 @@ bool Join::merge_join_conditions(string& embedded_filter, string& query_filter) 
         }
     }
 
+    return true;
+}
+
+// If joins to the same collection are found in both `embedded_filter` and `query_filter`, remove the join from
+// `embedded_filter` and merge its join condition with the `query_filter` join in the following manner:
+// `$JoinCollectionName((<embedded_join_condition>) && (<query_join_condition>))`
+// The merge is only done when both joins are positive and required on every path of their filters, otherwise both
+// filters are left unchanged.
+bool Join::merge_join_conditions(string& embedded_filter, string& query_filter) {
+    std::string merged_embedded_filter = embedded_filter, merged_query_filter = query_filter;
+    bool skip_merge = false;
+    if (!merge_join_conditions_in_place(merged_embedded_filter, merged_query_filter, skip_merge)) {
+        return false;
+    }
+
+    if (!skip_merge) {
+        embedded_filter = std::move(merged_embedded_filter);
+        query_filter = std::move(merged_query_filter);
+    }
     return true;
 }

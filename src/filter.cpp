@@ -375,6 +375,76 @@ Option<bool> toPostfix(std::queue<std::string>& tokens, std::queue<std::string>&
     return Option<bool>(true);
 }
 
+struct required_join_node_t {
+    bool is_and = false;
+    int left = -1;
+    int right = -1;
+    std::string expression;
+};
+
+Option<bool> filter::get_required_joins(const std::string& filter_query, std::set<std::string>& collection_names) {
+    std::queue<std::string> tokens;
+    auto tokenize_op = tokenize_filter_query(filter_query, tokens);
+    if (!tokenize_op.ok()) {
+        return tokenize_op;
+    }
+
+    std::queue<std::string> postfix;
+    auto postfix_op = toPostfix(tokens, postfix);
+    if (!postfix_op.ok()) {
+        return postfix_op;
+    }
+
+    // mirrors toParseTree without resolving any field
+    std::vector<required_join_node_t> nodes;
+    std::stack<int> node_stack;
+    while (!postfix.empty()) {
+        auto expression = postfix.front();
+        postfix.pop();
+
+        required_join_node_t node;
+        if (isOperator(expression)) {
+            if (node_stack.size() < 2) {
+                return Option<bool>(400, "Could not parse the filter query: unbalanced `" + expression + "` operands.");
+            }
+            node.is_and = expression == "&&";
+            node.right = node_stack.top();
+            node_stack.pop();
+            node.left = node_stack.top();
+            node_stack.pop();
+        } else {
+            node.expression = std::move(expression);
+        }
+
+        nodes.push_back(std::move(node));
+        node_stack.push(nodes.size() - 1);
+    }
+
+    if (node_stack.size() != 1) {
+        return Option<bool>(400, "Could not parse the filter query: missing `&&` or `||` between expressions.");
+    }
+
+    // a join is required when only `&&` nodes lie between it and the root
+    std::vector<int> pending = {node_stack.top()};
+    while (!pending.empty()) {
+        auto const& node = nodes[pending.back()];
+        pending.pop_back();
+
+        if (node.left != -1) {
+            if (node.is_and) {
+                pending.push_back(node.left);
+                pending.push_back(node.right);
+            }
+        } else if (node.expression[0] == '$') {
+            auto name = node.expression.substr(1, node.expression.find('(') - 1);
+            StringUtils::trim(name);
+            collection_names.insert(name);
+        }
+    }
+
+    return Option<bool>(true);
+}
+
 Option<bool> toMultiValueNumericFilter(std::string& raw_value, filter& filter_exp, const field& _field) {
     std::vector<std::string> filter_values;
     StringUtils::split(raw_value.substr(1, raw_value.size() - 2), filter_values, ",");

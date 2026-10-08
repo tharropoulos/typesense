@@ -2,6 +2,7 @@
 
 #include <string>
 #include <map>
+#include <set>
 #include "tsl/htrie_map.h"
 #include "json.hpp"
 #include "store.h"
@@ -97,6 +98,9 @@ struct filter {
     static Option<bool> tokenize_filter_query(const std::string& filter_query, std::queue<std::string>& tokens);
 
     static Option<bool> parse_filter_string(const std::string& filter_query, std::string& token, size_t& index);
+
+    // collections of the positive joins that every match of `filter_query` must satisfy
+    static Option<bool> get_required_joins(const std::string& filter_query, std::set<std::string>& collection_names);
 };
 
 struct filter_node_t {
