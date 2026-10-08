@@ -124,6 +124,17 @@ bool reference_filter_result_t::intersect_reference_results(const reference_filt
     return true;
 }
 
+static void replace_reference_result(reference_filter_result_t& out_ref_result,
+                                     reference_filter_result_t&& ref_result) {
+    delete [] out_ref_result.docs;
+    delete [] out_ref_result.coll_to_references;
+    out_ref_result.count = 0;
+    out_ref_result.docs = nullptr;
+    out_ref_result.coll_to_references = nullptr;
+    out_ref_result.is_unconstrained = ref_result.is_unconstrained;
+    out_ref_result = std::move(ref_result);
+}
+
 bool reference_filter_result_t::and_references(const std::map<std::string, reference_filter_result_t>& a_references,
                                                const std::map<std::string, reference_filter_result_t>& b_references,
                                                std::map<std::string, reference_filter_result_t>& result_references) {
@@ -134,6 +145,21 @@ bool reference_filter_result_t::and_references(const std::map<std::string, refer
         auto ref_it = result_references.find(ref_collection_name);
         if (ref_it == result_references.end()) {
             result_references[ref_collection_name] = b_ref_result;
+            continue;
+        }
+
+        // an unconstrained side does not restrict the references of the other side
+        if (ref_it->second.is_unconstrained && b_ref_result.is_unconstrained) {
+            std::map<std::string, reference_filter_result_t> a_single, b_single, merged;
+            a_single.emplace(ref_collection_name, ref_it->second);
+            b_single.emplace(ref_collection_name, b_ref_result);
+            or_references(a_single, b_single, merged);
+            replace_reference_result(ref_it->second, std::move(merged[ref_collection_name]));
+            continue;
+        } else if (ref_it->second.is_unconstrained) {
+            replace_reference_result(ref_it->second, reference_filter_result_t(b_ref_result));
+            continue;
+        } else if (b_ref_result.is_unconstrained) {
             continue;
         }
 
@@ -155,6 +181,11 @@ bool reference_filter_result_t::and_references(const std::map<std::string, refer
 void reference_filter_result_t::or_references(const std::map<std::string, reference_filter_result_t>& a_references,
                                               const std::map<std::string, reference_filter_result_t>& b_references,
                                               std::map<std::string, reference_filter_result_t>& result_references) {
+    // callers can pass a null result when neither side has references
+    if (a_references.empty() && b_references.empty()) {
+        return;
+    }
+
     // Copy the references of the document from every collection into result.
     result_references.insert(a_references.begin(), a_references.end());
 
@@ -268,6 +299,14 @@ void reference_filter_result_t::or_references(const std::map<std::string, refere
         a_ref_result.docs = out_docs;
         a_ref_result.coll_to_references = out_coll_to_references;
         a_ref_result.delete_docs = true;
+        a_ref_result.is_unconstrained = a_ref_result.is_unconstrained || b_ref_result.is_unconstrained;
+    }
+
+    // the document also matched an operand that does not join this collection
+    for (auto& [ref_coll_name, ref_result] : result_references) {
+        if (a_references.count(ref_coll_name) == 0 || b_references.count(ref_coll_name) == 0) {
+            ref_result.is_unconstrained = true;
+        }
     }
 }
 

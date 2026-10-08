@@ -21,6 +21,10 @@ struct reference_filter_result_t {
     bool is_reference_array_field = true;
     bool delete_docs = true;
 
+    // set when an OR matched the document through an operand that does not join this collection. the docs are kept
+    // for includes but an AND does not intersect with them.
+    bool is_unconstrained = false;
+
     // In case of nested join, references can further have references.
     std::map<std::string, reference_filter_result_t>* coll_to_references = nullptr;
 
@@ -36,6 +40,8 @@ struct reference_filter_result_t {
             return;
         }
 
+        is_unconstrained = obj.is_unconstrained;
+
         count = obj.count;
         docs = new uint32_t[count];
         memcpy(docs, obj.docs, count * sizeof(uint32_t));
@@ -49,6 +55,8 @@ struct reference_filter_result_t {
         if (&obj == this || obj.count == 0) {
             return *this;
         }
+
+        is_unconstrained = obj.is_unconstrained;
 
         count = obj.count;
         docs = new uint32_t[count];
@@ -70,6 +78,7 @@ struct reference_filter_result_t {
         coll_to_references = obj.coll_to_references;
         is_reference_array_field = obj.is_reference_array_field;
         delete_docs = obj.delete_docs;
+        is_unconstrained = obj.is_unconstrained;
 
         // Set default values in obj.
         obj.count = 0;

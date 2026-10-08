@@ -12664,6 +12664,80 @@ TEST_F(CollectionJoinTest, EmbeddedParamsJoin) {
     res_obj = nlohmann::json::parse(json_res);
     ASSERT_EQ(1, res_obj["found"].get<size_t>());
     ASSERT_EQ("product_b", res_obj["hits"][0]["document"]["product_id"]);
+
+    // product_a matches both operands of the OR, the product_id one does not restrict which customers it joins.
+    // product_b only matches through customer_b, which is not one of its customer_a references.
+    req_params = {
+            {"collection", "Products"},
+            {"q", "*"},
+            {"filter_by", "$Customers(customer_id:customer_b) || product_id:product_a"},
+    };
+    json_res.clear();
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(1, res_obj["found"].get<size_t>());
+    ASSERT_EQ("product_a", res_obj["hits"][0]["document"]["product_id"]);
+    ASSERT_EQ("customer_a", res_obj["hits"][0]["document"]["Customers"]["customer_id"]);
+
+    // same result without a scoped key
+    req_params = {
+            {"collection", "Products"},
+            {"q", "*"},
+            {"filter_by", "($Customers(customer_id:customer_b) || product_id:product_a) && "
+                          "$Customers(customer_id:customer_a)"},
+    };
+    embedded_params = nlohmann::json::object();
+    json_res.clear();
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(1, res_obj["found"].get<size_t>());
+    ASSERT_EQ("product_a", res_obj["hits"][0]["document"]["product_id"]);
+    ASSERT_EQ("customer_a", res_obj["hits"][0]["document"]["Customers"]["customer_id"]);
+
+    // without the AND, the OR keeps the customer_b references for includes
+    req_params = {
+            {"collection", "Products"},
+            {"q", "*"},
+            {"filter_by", "$Customers(customer_id:customer_b) || product_id:product_a"},
+    };
+    json_res.clear();
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(2, res_obj["found"].get<size_t>());
+    ASSERT_EQ("product_b", res_obj["hits"][0]["document"]["product_id"]);
+    ASSERT_EQ("customer_b", res_obj["hits"][0]["document"]["Customers"]["customer_id"]);
+    ASSERT_EQ("product_a", res_obj["hits"][1]["document"]["product_id"]);
+    ASSERT_EQ("customer_b", res_obj["hits"][1]["document"]["Customers"]["customer_id"]);
+
+    // joins to the same collection under a plain AND still have to match the same referenced document
+    req_params = {
+            {"collection", "Products"},
+            {"q", "*"},
+            {"filter_by", "$Customers(customer_id:customer_b) && $Customers(customer_id:customer_a)"},
+    };
+    json_res.clear();
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(0, res_obj["found"].get<size_t>());
+
+    // product_b references customer_a and customer_b through different documents
+    embedded_params["filter_by"] = "$Customers(customer_id:customer_a && product_price:<100)";
+    req_params = {
+            {"collection", "Products"},
+            {"q", "*"},
+            {"filter_by", "$Customers(customer_id:customer_b) || product_id:product_b"},
+    };
+    json_res.clear();
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(1, res_obj["found"].get<size_t>());
+    ASSERT_EQ("product_b", res_obj["hits"][0]["document"]["product_id"]);
+    ASSERT_EQ("customer_a", res_obj["hits"][0]["document"]["Customers"]["customer_id"]);
 }
 
 TEST_F(CollectionJoinTest, QueryByReference) {
