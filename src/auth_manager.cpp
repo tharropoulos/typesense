@@ -2,6 +2,7 @@
 #include <openssl/evp.h>
 #include <regex>
 #include <join.h>
+#include "filter.h"
 
 constexpr const char* AuthManager::DOCUMENTS_SEARCH_ACTION;
 constexpr const uint64_t api_key_t::FAR_FUTURE_TIMESTAMP;
@@ -476,6 +477,51 @@ Option<uint32_t> api_key_t::validate(const nlohmann::json &key_obj) {
     return Option<uint32_t>(200);
 }
 
+static bool tokenize_to_vector(const std::string& filter_query, std::vector<std::string>& out) {
+    std::queue<std::string> tokens;
+    if(!filter::tokenize_filter_query(filter_query, tokens).ok()) {
+        return false;
+    }
+    while(!tokens.empty()) {
+        out.push_back(tokens.front());
+        tokens.pop();
+    }
+    return true;
+}
+
+// the combined string must tokenize as `( query ) && ( embedded )` with the first `(` closing right before the `&&`.
+// that keeps the `&&` at the root with the embedded filter as one of its operands. otherwise the query could swallow
+// or detach the embedded filter.
+static bool is_isolated_and(const std::string& embedded_filter, const std::string& combined) {
+    std::vector<std::string> embedded_tokens, combined_tokens;
+    if(!tokenize_to_vector(embedded_filter, embedded_tokens) || !tokenize_to_vector(combined, combined_tokens)) {
+        return false;
+    }
+
+    if(combined_tokens.empty() || combined_tokens[0] != "(") {
+        return false;
+    }
+
+    size_t query_end = 0;
+    int depth = 0;
+    for(; query_end < combined_tokens.size(); query_end++) {
+        if(combined_tokens[query_end] == "(") {
+            depth++;
+        } else if(combined_tokens[query_end] == ")" && --depth == 0) {
+            break;
+        }
+    }
+
+    // `) && (` + embedded + `)`
+    const size_t embedded_start = query_end + 3;
+    if(embedded_start + embedded_tokens.size() + 1 != combined_tokens.size() ||
+       combined_tokens[query_end + 1] != "&&" || combined_tokens[query_end + 2] != "(" ||
+       combined_tokens.back() != ")") {
+        return false;
+    }
+
+    return std::equal(embedded_tokens.begin(), embedded_tokens.end(), combined_tokens.begin() + embedded_start);
+}
 
 bool AuthManager::add_item_to_params(std::map<std::string, std::string>& req_params,
                                      const nlohmann::detail::iteration_proxy_value<nlohmann::json::iterator>& item,
@@ -510,7 +556,11 @@ bool AuthManager::add_item_to_params(std::map<std::string, std::string>& req_par
         }
 
         if(!req_params[item.key()].empty() && !str_value.empty()) {
-            req_params[item.key()] = "(" + req_params[item.key()] + ") && (" + str_value + ")";
+            const std::string combined = "(" + req_params[item.key()] + ") && (" + str_value + ")";
+            if(!is_isolated_and(str_value, combined)) {
+                return false;
+            }
+            req_params[item.key()] = combined;
         } else if(req_params[item.key()].empty() && !str_value.empty()) {
             req_params[item.key()] = "(" + str_value + ")";
         } else if(!req_params[item.key()].empty() && str_value.empty()) {

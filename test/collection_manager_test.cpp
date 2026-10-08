@@ -782,6 +782,79 @@ TEST_F(CollectionManagerTest, VerifyEmbeddedParametersOfScopedAPIKey) {
     collectionManager.drop_collection("coll1");
 }
 
+TEST_F(CollectionManagerTest, EmbeddedFilterOfScopedAPIKeyCannotBeEscaped) {
+    std::vector<field> fields = {field("tenant", field_types::STRING, true),
+                                 field("status", field_types::STRING, true),
+                                 field("name", field_types::STRING, false),};
+
+    Collection* coll1 = collectionManager.create_collection("iso", 1, fields).get();
+
+    std::vector<std::vector<std::string>> docs = {{"a1", "A", "open", "a"},
+                                                  {"b1", "B", "open", "c"},
+                                                  {"b2", "B", "closed", "d"}};
+    for(const auto& d: docs) {
+        nlohmann::json doc;
+        doc["id"] = d[0];
+        doc["tenant"] = d[1];
+        doc["status"] = d[2];
+        doc["name"] = d[3];
+        ASSERT_TRUE(coll1->add(doc.dump()).ok());
+    }
+
+    nlohmann::json embedded_params;
+    embedded_params["filter_by"] = "tenant:=A";
+
+    auto now_ts = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+
+    // unterminated backtick would swallow the appended embedded filter
+    std::map<std::string, std::string> req_params;
+    req_params["collection"] = "iso";
+    req_params["q"] = "*";
+    req_params["query_by"] = "name";
+    req_params["filter_by"] = "status:=open) || tenant:=B || name:=`zz";
+
+    std::string json_res;
+    auto search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_FALSE(search_op.ok());
+    ASSERT_EQ(400, search_op.code());
+
+    // geo value opened inside a backtick
+    req_params.clear();
+    req_params["collection"] = "iso";
+    req_params["q"] = "*";
+    req_params["query_by"] = "name";
+    req_params["filter_by"] = "status:=open) || tenant:=B || name:=`a:(";
+    json_res.clear();
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_FALSE(search_op.ok());
+
+    // unbalanced parens that close the wrapper early
+    req_params.clear();
+    req_params["collection"] = "iso";
+    req_params["q"] = "*";
+    req_params["query_by"] = "name";
+    req_params["filter_by"] = "status:=open) || (tenant:=B";
+    json_res.clear();
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_FALSE(search_op.ok());
+
+    // a well formed request filter still merges with the embedded one
+    req_params.clear();
+    req_params["collection"] = "iso";
+    req_params["q"] = "*";
+    req_params["query_by"] = "name";
+    req_params["filter_by"] = "status:=open || tenant:=B || name:=`zz`";
+    json_res.clear();
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+    nlohmann::json res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(1, res_obj["found"].get<size_t>());
+    ASSERT_EQ("a1", res_obj["hits"][0]["document"]["id"].get<std::string>());
+
+    collectionManager.drop_collection("iso");
+}
+
 TEST_F(CollectionManagerTest, QuerySuggestionsShouldBeTrimmed) {
     std::vector<field> fields = {field("title", field_types::STRING, false, false, true, "", -1, 1),
                                  field("year", field_types::INT32, false),
