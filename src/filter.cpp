@@ -884,6 +884,15 @@ Option<bool> toParseTree(std::queue<std::string>& postfix, filter_node_t*& root,
     if (nodeStack.empty()) {
         return Option<bool>(400, "Filter query cannot be empty.");
     }
+
+    // operands without an operator between them would leave more than one node, keeping only the last
+    if (nodeStack.size() > 1) {
+        while (!nodeStack.empty()) {
+            delete nodeStack.top();
+            nodeStack.pop();
+        }
+        return Option<bool>(400, "Could not parse the filter query: missing `&&` or `||` between expressions.");
+    }
     root = nodeStack.top();
 
     return Option<bool>(true);
