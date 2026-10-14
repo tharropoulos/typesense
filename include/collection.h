@@ -307,6 +307,9 @@ struct collection_search_args_t {
     bool apply_join_policy_to_facet_parent = true;
     bool apply_join_policy_to_facets = true;
 
+    // set only from the scoped key's embedded params
+    std::string scoped_filter_by;
+
     std::vector<std::vector<KV*>> result_group_kvs{};
 
     collection_search_args_t(std::string raw_query, std::vector<std::string> search_fields, std::string filter_query,

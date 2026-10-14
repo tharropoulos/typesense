@@ -2609,7 +2609,7 @@ Option<bool> Index::run_search(search_args* search_params) {
                           search_params->synonym_sets,
                           search_params->union_result_seq_ids,
                           search_params->diversity, search_params->group_max_candidates,
-                          nullptr);
+                          nullptr, search_params->curated_scope_filter.get());
         first_pass.take_ownership();
 
         // The filter iterator can be updated in places like `Index::do_phrase_search`.
@@ -2710,7 +2710,8 @@ Option<bool> Index::run_search(search_args* search_params) {
                   search_params->union_result_seq_ids,
                   search_params->diversity,
                   search_params->group_max_candidates,
-                  selected_group_keys
+                  selected_group_keys,
+                  search_params->curated_scope_filter.get()
     );
 
     // The filter iterator can be updated in places like `Index::do_phrase_search`.
@@ -2751,7 +2752,8 @@ void Index::collate_included_ids(const std::vector<token_t>& q_included_tokens,
                                  const size_t group_limit,
                                  const std::vector<std::string>& group_by_fields,
                                  const bool group_missing_values,
-                                 const  std::map<std::string, reference_filter_result_t>& references) const {
+                                 const  std::map<std::string, reference_filter_result_t>& references,
+                                 const std::map<uint32_t, std::map<std::string, reference_filter_result_t>>& included_ids_references) const {
 
     if(included_ids_map.empty()) {
         return;
@@ -2785,7 +2787,9 @@ void Index::collate_included_ids(const std::vector<token_t>& q_included_tokens,
             scores[2] = int64_t(1);
 
             //included ids are upstream validated, so can directly add references
-            KV kv(0, seq_id, distinct_id, 0, scores, references);
+            const auto included_references_it = included_ids_references.find(seq_id);
+            KV kv(0, seq_id, distinct_id, 0, scores, included_references_it == included_ids_references.end() ?
+                                                     references : included_references_it->second);
             curated_topster->add(&kv);
         }
     }
@@ -3578,7 +3582,8 @@ Option<bool> Index::search(std::vector<query_tokens_t>& field_query_tokens, cons
                    Collection const *const collection,
                    const std::vector<std::string>& synonym_sets, id_list_t* union_result_seq_ids,
                    const diversity_t& diversity, const size_t group_max_candidates,
-                   group_key_allowlist_t group_key_allowlist) const {
+                   group_key_allowlist_t group_key_allowlist,
+                   const filter_node_t* curated_scope_filter) const {
     std::shared_lock lock(mutex);
 
     group_found_params_t group_found_params{};
@@ -3613,12 +3618,15 @@ Option<bool> Index::search(std::vector<query_tokens_t>& field_query_tokens, cons
     std::set<uint32_t> curated_ids;
     std::map<size_t, std::map<size_t, uint32_t>> included_ids_map;  // outer pos => inner pos => list of IDs
     std::vector<uint32_t> included_ids_vec;
+    std::map<uint32_t, std::map<std::string, reference_filter_result_t>> included_ids_references;
 
     process_curated_ids(included_ids, excluded_ids, group_limit, filter_curated_hits,
                         filter_result_iterator, curated_ids, included_ids_map,
-                        included_ids_vec);
+                        included_ids_vec, included_ids_references, curated_scope_filter,
+                        max_filter_by_candidates, validate_field_names);
     collate_included_ids({}, included_ids_map, curated_topster, group_limit,
-                         group_by_fields, group_missing_values, filter_result_iterator->reference);
+                         group_by_fields, group_missing_values, filter_result_iterator->reference,
+                         included_ids_references);
     filter_result_iterator->reset();
     search_cutoff = search_cutoff || filter_result_iterator->validity == filter_result_iterator_t::timed_out;
 
@@ -4863,7 +4871,11 @@ void Index::process_curated_ids(const std::vector<std::pair<uint32_t, uint32_t>>
                                 const bool filter_curated_hits, filter_result_iterator_t* const filter_result_iterator,
                                 std::set<uint32_t>& curated_ids,
                                 std::map<size_t, std::map<size_t, uint32_t>>& included_ids_map,
-                                std::vector<uint32_t>& included_ids_vec) const {
+                                std::vector<uint32_t>& included_ids_vec,
+                                std::map<uint32_t, std::map<std::string, reference_filter_result_t>>& included_ids_references,
+                                const filter_node_t* curated_scope_filter,
+                                const size_t max_filter_by_candidates,
+                                const bool validate_field_names) const {
 
     for(const auto& seq_id_pos: included_ids) {
         included_ids_vec.push_back(seq_id_pos.first);
@@ -4872,10 +4884,34 @@ void Index::process_curated_ids(const std::vector<std::pair<uint32_t, uint32_t>>
     //sort the included ids to keep unidirectional iterators valid
     std::sort(included_ids_vec.begin(), included_ids_vec.end());
 
-    // if `filter_curated_hits` is enabled, we will remove curated hits that don't match filter condition
+    // curated hits must match the scoped key's filter, and the full filter too when `filter_curated_hits` is on
     std::set<uint32_t> included_ids_set;
 
-    if(!filter_result_iterator->is_filter_provided() || !filter_curated_hits) {
+    if(!filter_curated_hits && curated_scope_filter != nullptr) {
+        filter_result_iterator_t scope_iterator(get_collection_name(), this, curated_scope_filter,
+                                                true, max_filter_by_candidates,
+                                                search_begin_us, search_stop_us, validate_field_names);
+
+        if(scope_iterator.init_status().ok()) {
+            for(const auto& included_id: included_ids_vec) {
+                auto result = scope_iterator.is_valid(included_id);
+
+                if (result == -1) {
+                    break;
+                }
+
+                if (result == 1) {
+                    included_ids_set.insert(included_id);
+
+                    if(!scope_iterator.reference.empty()) {
+                        included_ids_references[included_id] = scope_iterator.reference;
+                    }
+                }
+            }
+        }
+
+        search_cutoff = search_cutoff || scope_iterator.validity == filter_result_iterator_t::timed_out;
+    } else if(!filter_result_iterator->is_filter_provided() || !filter_curated_hits) {
         included_ids_set.insert(included_ids_vec.begin(), included_ids_vec.end());
     } else if(filter_result_iterator->validity == filter_result_iterator_t::valid) {
         for (const auto &included_id: included_ids_vec) {
