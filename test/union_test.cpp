@@ -1075,6 +1075,78 @@ TEST_F(UnionTest, ScopedKeyLimitHitsAndFilterByAreEnforcedInUnionSearch) {
     req_params.clear();
 }
 
+TEST_F(UnionTest, ScopedKeysFilterPinnedHitsPerSearchInUnion) {
+    auto schema_json =
+            R"({
+                "name": "ScopedUnionTenants",
+                "fields": [
+                    {"name": "title", "type": "string"},
+                    {"name": "tenant", "type": "string"},
+                    {"name": "category", "type": "string"},
+                    {"name": "points", "type": "int32"}
+                ],
+                "default_sorting_field": "points"
+            })"_json;
+    auto collection_create_op = collectionManager.create_collection(schema_json);
+    ASSERT_TRUE(collection_create_op.ok());
+    auto coll = collection_create_op.get();
+
+    ASSERT_TRUE(coll->add(R"({"id": "a1", "title": "red sneaker", "tenant": "A", "category": "shoes", "points": 30})").ok());
+    ASSERT_TRUE(coll->add(R"({"id": "a2", "title": "blue cap", "tenant": "A", "category": "hats", "points": 20})").ok());
+    ASSERT_TRUE(coll->add(R"({"id": "b1", "title": "green sneaker", "tenant": "B", "category": "shoes", "points": 10})").ok());
+
+    api_key_t parent_key("UnionScopedTenantsParentKey", "scoped search parent", {"documents:search"},
+                         {"ScopedUnionTenants"}, api_key_t::FAR_FUTURE_TIMESTAMP);
+    auto key_op = collectionManager.getAuthManager().create_key(parent_key);
+    ASSERT_TRUE(key_op.ok());
+
+    const auto tenant_a_key = makeScopedSearchKey(parent_key.value, R"({"filter_by":"tenant:=A"})");
+    const auto tenant_b_key = makeScopedSearchKey(parent_key.value, R"({"filter_by":"tenant:=B"})");
+    embedded_params = std::vector<nlohmann::json>(2, nlohmann::json::object());
+    std::map<std::string, std::string> auth_params;
+    ASSERT_TRUE(collectionManager.getAuthManager().authenticate(
+            "documents:search", {collection_key_t("ScopedUnionTenants", tenant_a_key),
+                                 collection_key_t("ScopedUnionTenants", tenant_b_key)},
+            auth_params, embedded_params));
+
+    // duplicates are kept to expose a pin leaked by the second search
+    req_params = {
+            {"page", "1"},
+            {"per_page", "10"},
+            {"remove_duplicates", "false"}
+    };
+    searches = R"([
+                    {
+                        "collection": "ScopedUnionTenants",
+                        "q": "*",
+                        "filter_by": "category:=shoes",
+                        "pinned_hits": "b1:1,a2:2"
+                    },
+                    {
+                        "collection": "ScopedUnionTenants",
+                        "q": "*",
+                        "filter_by": "category:=shoes",
+                        "pinned_hits": "b1:1,a2:2"
+                    }
+                ])"_json;
+
+    auto search_op = collectionManager.do_union(req_params, embedded_params, searches, json_res, now_ts, false);
+    ASSERT_TRUE(search_op.ok());
+    ASSERT_EQ(3, json_res["found"].get<size_t>());
+
+    // the tie between pins at position 1 makes the merge order unstable
+    std::set<std::string> hit_keys;
+    for(const auto& hit : json_res["hits"]) {
+        const bool curated = hit.contains("curated") && hit["curated"].get<bool>();
+        hit_keys.insert(hit["document"]["id"].get<std::string>() + ":" +
+                        std::to_string(hit["search_index"].get<size_t>()) + ":" + (curated ? "true" : "false"));
+    }
+    std::set<std::string> expected_hit_keys = {"a2:0:true", "a1:0:false", "b1:1:true"};
+    ASSERT_EQ(expected_hit_keys, hit_keys);
+    json_res.clear();
+    req_params.clear();
+}
+
 TEST_F(UnionTest, Sorting) {
     setupNumericArrayCollection();
     setupBoolCollection();

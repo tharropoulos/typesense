@@ -297,6 +297,9 @@ struct collection_search_args_t {
     size_t group_max_candidates;
     size_t diversity_limit;
 
+    // set only from the scoped key's embedded params
+    std::string scoped_filter_by;
+
     std::vector<std::vector<KV*>> result_group_kvs{};
 
     collection_search_args_t(std::string raw_query, std::vector<std::string> search_fields, std::string filter_query,

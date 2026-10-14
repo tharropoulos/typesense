@@ -308,6 +308,62 @@ TEST_F(CoreAPIUtilsTest, MultiSearchEmbeddedKeys) {
 
 }
 
+TEST_F(CoreAPIUtilsTest, MultiSearchScopedKeysFilterPinnedHits) {
+    nlohmann::json schema = R"({
+        "name": "scoped_multi_pins",
+        "fields": [
+            {"name": "title", "type": "string"},
+            {"name": "tenant", "type": "string"},
+            {"name": "category", "type": "string"},
+            {"name": "points", "type": "int32"}
+        ],
+        "default_sorting_field": "points"
+    })"_json;
+    auto op = collectionManager.create_collection(schema);
+    ASSERT_TRUE(op.ok());
+    Collection* coll = op.get();
+
+    ASSERT_TRUE(coll->add(R"({"id": "a1", "title": "red sneaker", "tenant": "A", "category": "shoes", "points": 30})").ok());
+    ASSERT_TRUE(coll->add(R"({"id": "a2", "title": "blue cap", "tenant": "A", "category": "hats", "points": 20})").ok());
+    ASSERT_TRUE(coll->add(R"({"id": "b1", "title": "green sneaker", "tenant": "B", "category": "shoes", "points": 10})").ok());
+
+    auto req = std::make_shared<http_req>();
+    auto res = std::make_shared<http_res>(nullptr);
+
+    nlohmann::json body;
+    body["searches"] = nlohmann::json::array();
+    nlohmann::json search = {
+        {"collection", "scoped_multi_pins"},
+        {"q", "*"},
+        {"filter_by", "category:=shoes"},
+        {"pinned_hits", "b1:1,a2:2"}
+    };
+    body["searches"].push_back(search);
+    body["searches"].push_back(search);
+    req->body = body.dump();
+
+    nlohmann::json tenant_a_params = {{"filter_by", "tenant:=A"}};
+    nlohmann::json tenant_b_params = {{"filter_by", "tenant:=B"}};
+    req->embedded_params_vec.push_back(tenant_a_params);
+    req->embedded_params_vec.push_back(tenant_b_params);
+
+    ASSERT_TRUE(post_multi_search(req, res));
+
+    auto response = nlohmann::json::parse(res->body);
+    ASSERT_EQ(2, response["results"].size());
+
+    ASSERT_EQ(2, response["results"][0]["found"].get<size_t>());
+    ASSERT_EQ(2, response["results"][0]["hits"].size());
+    ASSERT_EQ("a2", response["results"][0]["hits"][0]["document"]["id"].get<std::string>());
+    ASSERT_TRUE(response["results"][0]["hits"][0]["curated"].get<bool>());
+    ASSERT_EQ("a1", response["results"][0]["hits"][1]["document"]["id"].get<std::string>());
+
+    ASSERT_EQ(1, response["results"][1]["found"].get<size_t>());
+    ASSERT_EQ(1, response["results"][1]["hits"].size());
+    ASSERT_EQ("b1", response["results"][1]["hits"][0]["document"]["id"].get<std::string>());
+    ASSERT_TRUE(response["results"][1]["hits"][0]["curated"].get<bool>());
+}
+
 TEST_F(CoreAPIUtilsTest, ScopedKeyEmbeddedCollectionCanSupplyMissingMultiSearchCollection) {
     nlohmann::json schema = R"({
         "name": "scoped_coll",

@@ -203,6 +203,7 @@ struct search_args {
     size_t found_count = 0;
     size_t found_docs = 0;
     id_list_t* union_result_seq_ids = nullptr;
+    std::unique_ptr<filter_node_t> curated_scope_filter;
     Collection const *const collection;
 
     diversity_t diversity{};
@@ -857,7 +858,8 @@ public:
                 const std::vector<std::string>& synonym_sets,
                 id_list_t* union_result_seq_ids,
                 const diversity_t& diversity, const size_t group_max_candidates,
-                group_key_allowlist_t group_key_allowlist = nullptr) const;
+                group_key_allowlist_t group_key_allowlist = nullptr,
+                const filter_node_t* curated_scope_filter = nullptr) const;
 
     void remove_field(uint32_t seq_id, nlohmann::json& document, const std::string& field_name,
                       const bool is_update);
@@ -1215,7 +1217,10 @@ public:
                              filter_result_iterator_t* const filter_result_iterator,
                              std::set<uint32_t>& curated_ids,
                              std::map<size_t, std::map<size_t, uint32_t>>& included_ids_map,
-                             std::vector<uint32_t>& included_ids_vec) const;
+                             std::vector<uint32_t>& included_ids_vec,
+                             const filter_node_t* curated_scope_filter,
+                             const size_t max_filter_by_candidates,
+                             const bool validate_field_names) const;
     
     int64_t get_doc_val_from_sort_index(sort_index_iterator it, uint32_t doc_seq_id) const;
 

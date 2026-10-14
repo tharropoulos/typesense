@@ -782,6 +782,302 @@ TEST_F(CollectionManagerTest, VerifyEmbeddedParametersOfScopedAPIKey) {
     collectionManager.drop_collection("coll1");
 }
 
+TEST_F(CollectionManagerTest, ScopedKeyFilterAppliesToPinnedHits) {
+    nlohmann::json schema = R"({
+        "name": "scoped_pins",
+        "fields": [
+            {"name": "title", "type": "string"},
+            {"name": "tenant", "type": "string", "facet": true},
+            {"name": "category", "type": "string", "facet": true},
+            {"name": "points", "type": "int32"}
+        ],
+        "default_sorting_field": "points"
+    })"_json;
+
+    auto create_op = collectionManager.create_collection(schema);
+    ASSERT_TRUE(create_op.ok());
+    Collection* coll = create_op.get();
+
+    ASSERT_TRUE(coll->add(R"({"id": "a1", "title": "red sneaker", "tenant": "A", "category": "shoes", "points": 30})").ok());
+    ASSERT_TRUE(coll->add(R"({"id": "a2", "title": "blue cap", "tenant": "A", "category": "hats", "points": 20})").ok());
+    ASSERT_TRUE(coll->add(R"({"id": "b1", "title": "green sneaker", "tenant": "B", "category": "shoes", "points": 10})").ok());
+
+    std::string json_res;
+    auto now_ts = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+
+    // pin within the key's filter is kept even though it fails the request filter
+    std::map<std::string, std::string> req_params = {
+        {"collection", "scoped_pins"},
+        {"q", "*"},
+        {"filter_by", "category:=shoes"},
+        {"pinned_hits", "a2:1"}
+    };
+    nlohmann::json embedded_params = {{"filter_by", "tenant:=A"}};
+
+    auto search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+    nlohmann::json res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(2, res_obj["found"].get<size_t>());
+    ASSERT_EQ(2, res_obj["hits"].size());
+    ASSERT_EQ("a2", res_obj["hits"][0]["document"]["id"].get<std::string>());
+    ASSERT_TRUE(res_obj["hits"][0]["curated"].get<bool>());
+    ASSERT_EQ("a1", res_obj["hits"][1]["document"]["id"].get<std::string>());
+
+    // pin outside the key's filter is dropped and the next pin slides up
+    req_params = {
+        {"collection", "scoped_pins"},
+        {"q", "*"},
+        {"pinned_hits", "b1:1,a2:2"}
+    };
+    embedded_params = {{"filter_by", "tenant:=A"}};
+
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(2, res_obj["found"].get<size_t>());
+    ASSERT_EQ(2, res_obj["hits"].size());
+    ASSERT_EQ("a2", res_obj["hits"][0]["document"]["id"].get<std::string>());
+    ASSERT_TRUE(res_obj["hits"][0]["curated"].get<bool>());
+    ASSERT_EQ("a1", res_obj["hits"][1]["document"]["id"].get<std::string>());
+
+    // filter_curated_hits applies the full filter to pins
+    req_params = {
+        {"collection", "scoped_pins"},
+        {"q", "*"},
+        {"filter_by", "category:=shoes"},
+        {"pinned_hits", "a2:1"},
+        {"filter_curated_hits", "true"}
+    };
+    embedded_params = {{"filter_by", "tenant:=A"}};
+
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(1, res_obj["found"].get<size_t>());
+    ASSERT_EQ(1, res_obj["hits"].size());
+    ASSERT_EQ("a1", res_obj["hits"][0]["document"]["id"].get<std::string>());
+
+    // embedding filter_curated_hits: false does not lift the key's filter
+    req_params = {
+        {"collection", "scoped_pins"},
+        {"q", "*"},
+        {"filter_by", "category:=shoes"},
+        {"pinned_hits", "b1:1,a2:2"}
+    };
+    embedded_params = {{"filter_by", "tenant:=A"}, {"filter_curated_hits", false}};
+
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(2, res_obj["found"].get<size_t>());
+    ASSERT_EQ(2, res_obj["hits"].size());
+    ASSERT_EQ("a2", res_obj["hits"][0]["document"]["id"].get<std::string>());
+    ASSERT_TRUE(res_obj["hits"][0]["curated"].get<bool>());
+    ASSERT_EQ("a1", res_obj["hits"][1]["document"]["id"].get<std::string>());
+
+    // empty embedded filter_by leaves pins unfiltered
+    req_params = {
+        {"collection", "scoped_pins"},
+        {"q", "*"},
+        {"filter_by", "category:=shoes"},
+        {"pinned_hits", "b1:1,a2:2"}
+    };
+    embedded_params = {{"filter_by", ""}};
+
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(3, res_obj["found"].get<size_t>());
+    ASSERT_EQ(3, res_obj["hits"].size());
+    ASSERT_EQ("b1", res_obj["hits"][0]["document"]["id"].get<std::string>());
+    ASSERT_TRUE(res_obj["hits"][0]["curated"].get<bool>());
+    ASSERT_EQ("a2", res_obj["hits"][1]["document"]["id"].get<std::string>());
+    ASSERT_TRUE(res_obj["hits"][1]["curated"].get<bool>());
+    ASSERT_EQ("a1", res_obj["hits"][2]["document"]["id"].get<std::string>());
+
+    // request filter matching nothing still returns a pin within the key's filter
+    req_params = {
+        {"collection", "scoped_pins"},
+        {"q", "*"},
+        {"filter_by", "category:=boots"},
+        {"pinned_hits", "a2:1"}
+    };
+    embedded_params = {{"filter_by", "tenant:=A"}};
+
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(1, res_obj["found"].get<size_t>());
+    ASSERT_EQ(1, res_obj["hits"].size());
+    ASSERT_EQ("a2", res_obj["hits"][0]["document"]["id"].get<std::string>());
+    ASSERT_TRUE(res_obj["hits"][0]["curated"].get<bool>());
+
+    // key filter matching nothing drops every pin
+    req_params = {
+        {"collection", "scoped_pins"},
+        {"q", "*"},
+        {"pinned_hits", "a1:1,b1:2"}
+    };
+    embedded_params = {{"filter_by", "tenant:=C"}};
+
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(0, res_obj["found"].get<size_t>());
+    ASSERT_EQ(0, res_obj["hits"].size());
+
+    // group_by keeps the in-scope pin and drops the out-of-scope pin
+    req_params = {
+        {"collection", "scoped_pins"},
+        {"q", "*"},
+        {"filter_by", "category:=shoes"},
+        {"group_by", "category"},
+        {"pinned_hits", "b1:1,a2:2"}
+    };
+    embedded_params = {{"filter_by", "tenant:=A"}};
+
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(2, res_obj["found"].get<size_t>());
+    ASSERT_EQ(2, res_obj["grouped_hits"].size());
+    ASSERT_EQ("hats", res_obj["grouped_hits"][0]["group_key"][0].get<std::string>());
+    ASSERT_EQ(1, res_obj["grouped_hits"][0]["hits"].size());
+    ASSERT_EQ("a2", res_obj["grouped_hits"][0]["hits"][0]["document"]["id"].get<std::string>());
+    ASSERT_EQ("shoes", res_obj["grouped_hits"][1]["group_key"][0].get<std::string>());
+    ASSERT_EQ(1, res_obj["grouped_hits"][1]["hits"].size());
+    ASSERT_EQ("a1", res_obj["grouped_hits"][1]["hits"][0]["document"]["id"].get<std::string>());
+
+    collectionManager.drop_collection("scoped_pins");
+}
+
+TEST_F(CollectionManagerTest, ScopedKeyPinMatchingFullFilterIsNotEvicted) {
+    nlohmann::json schema = R"({
+        "name": "scoped_pins_cap",
+        "fields": [
+            {"name": "title", "type": "string"},
+            {"name": "tenant", "type": "string", "facet": true},
+            {"name": "category", "type": "string", "facet": true},
+            {"name": "points", "type": "int32"}
+        ],
+        "default_sorting_field": "points"
+    })"_json;
+
+    auto create_op = collectionManager.create_collection(schema);
+    ASSERT_TRUE(create_op.ok());
+    Collection* coll = create_op.get();
+
+    ASSERT_TRUE(coll->add(R"({"id": "a1", "title": "red sneaker", "tenant": "A", "category": "shoes", "points": 30})").ok());
+    ASSERT_TRUE(coll->add(R"({"id": "a2", "title": "blue cap", "tenant": "A", "category": "hats", "points": 20})").ok());
+    ASSERT_TRUE(coll->add(R"({"id": "b1", "title": "green sneaker", "tenant": "B", "category": "shoes", "points": 10})").ok());
+
+    std::string json_res;
+    auto now_ts = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+
+    // a2 only matches the key's filter, a1 matches the full filter
+    std::map<std::string, std::string> req_params = {
+        {"collection", "scoped_pins_cap"},
+        {"q", "*"},
+        {"filter_by", "category:=shoes"},
+        {"pinned_hits", "a2:1,a1:2"}
+    };
+    nlohmann::json embedded_params = {{"filter_by", "tenant:=A"}};
+
+    auto search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+    nlohmann::json res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(2, res_obj["hits"].size());
+    ASSERT_EQ("a2", res_obj["hits"][0]["document"]["id"].get<std::string>());
+    ASSERT_TRUE(res_obj["hits"][0]["curated"].get<bool>());
+    ASSERT_EQ("a1", res_obj["hits"][1]["document"]["id"].get<std::string>());
+    ASSERT_TRUE(res_obj["hits"][1]["curated"].get<bool>());
+
+    collectionManager.drop_collection("scoped_pins_cap");
+}
+
+TEST_F(CollectionManagerTest, ScopedKeyFilterAppliesToCurationIncludes) {
+    nlohmann::json schema = R"({
+        "name": "scoped_curations",
+        "fields": [
+            {"name": "title", "type": "string"},
+            {"name": "tenant", "type": "string", "facet": true},
+            {"name": "category", "type": "string", "facet": true},
+            {"name": "points", "type": "int32"}
+        ],
+        "default_sorting_field": "points",
+        "curation_sets": ["index"]
+    })"_json;
+
+    auto create_op = collectionManager.create_collection(schema);
+    ASSERT_TRUE(create_op.ok());
+    Collection* coll = create_op.get();
+
+    ASSERT_TRUE(coll->add(R"({"id": "a1", "title": "red sneaker", "tenant": "A", "category": "shoes", "points": 30})").ok());
+    ASSERT_TRUE(coll->add(R"({"id": "a2", "title": "blue cap", "tenant": "A", "category": "hats", "points": 20})").ok());
+    ASSERT_TRUE(coll->add(R"({"id": "b1", "title": "green sneaker", "tenant": "B", "category": "shoes", "points": 10})").ok());
+
+    auto& ov_manager = CurationIndexManager::get_instance();
+
+    nlohmann::json static_curation = R"({
+        "id": "scoped-static-include",
+        "rule": {"query": "sneaker", "match": "exact"},
+        "includes": [{"id": "b1", "position": 1}, {"id": "a2", "position": 2}]
+    })"_json;
+    ASSERT_TRUE(ov_manager.upsert_curation_item("index", static_curation).ok());
+
+    nlohmann::json dynamic_curation = R"({
+        "id": "scoped-dynamic-include",
+        "rule": {"query": "{category}", "match": "exact"},
+        "remove_matched_tokens": true,
+        "filter_by": "category:={category}",
+        "includes": [{"id": "b1", "position": 1}, {"id": "a1", "position": 2}]
+    })"_json;
+    ASSERT_TRUE(ov_manager.upsert_curation_item("index", dynamic_curation).ok());
+
+    std::string json_res;
+    auto now_ts = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+
+    // rule include outside the key's filter is dropped and the in-scope include slides up
+    std::map<std::string, std::string> req_params = {
+        {"collection", "scoped_curations"},
+        {"q", "sneaker"},
+        {"query_by", "title"},
+        {"filter_by", "category:=shoes"}
+    };
+    nlohmann::json embedded_params = {{"filter_by", "tenant:=A"}};
+
+    auto search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+    nlohmann::json res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(2, res_obj["found"].get<size_t>());
+    ASSERT_EQ(2, res_obj["hits"].size());
+    ASSERT_EQ("a2", res_obj["hits"][0]["document"]["id"].get<std::string>());
+    ASSERT_TRUE(res_obj["hits"][0]["curated"].get<bool>());
+    ASSERT_EQ("a1", res_obj["hits"][1]["document"]["id"].get<std::string>());
+
+    // same for includes added by a dynamic filter rule
+    req_params = {
+        {"collection", "scoped_curations"},
+        {"q", "hats"},
+        {"query_by", "title"}
+    };
+    embedded_params = {{"filter_by", "tenant:=A"}};
+
+    search_op = collectionManager.do_search(req_params, embedded_params, json_res, now_ts);
+    ASSERT_TRUE(search_op.ok());
+    res_obj = nlohmann::json::parse(json_res);
+    ASSERT_EQ(2, res_obj["found"].get<size_t>());
+    ASSERT_EQ(2, res_obj["hits"].size());
+    ASSERT_EQ("a1", res_obj["hits"][0]["document"]["id"].get<std::string>());
+    ASSERT_TRUE(res_obj["hits"][0]["curated"].get<bool>());
+    ASSERT_EQ("a2", res_obj["hits"][1]["document"]["id"].get<std::string>());
+
+    collectionManager.drop_collection("scoped_curations");
+}
+
 TEST_F(CollectionManagerTest, QuerySuggestionsShouldBeTrimmed) {
     std::vector<field> fields = {field("title", field_types::STRING, false, false, true, "", -1, 1),
                                  field("year", field_types::INT32, false),

@@ -3383,6 +3383,19 @@ Option<bool> Collection::init_index_search_args(collection_search_args_t& coll_a
                                                validate_field_names, nullptr, this, all_synonym_sets, std::move(diversity),
                                                coll_args.group_max_candidates);
 
+    // curated hits must match the scoped key's filter even when `filter_curated_hits` is off
+    if(!filter_curated_hits && !coll_args.scoped_filter_by.empty() && !included_ids.empty()) {
+        filter_node_t* curated_scope_root = nullptr;
+        Option<bool> parse_scope_op = filter::parse_filter_query(coll_args.scoped_filter_by, search_schema,
+                                                                 store, doc_id_prefix, curated_scope_root,
+                                                                 validate_field_names);
+        index_args->curated_scope_filter.reset(curated_scope_root);
+
+        if(!parse_scope_op.ok()) {
+            return parse_scope_op;
+        }
+    }
+
     return Option<bool>(true);
 }
 Option<nlohmann::json> Collection::search(std::string query, const std::vector<std::string> & search_fields,

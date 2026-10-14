@@ -2614,7 +2614,7 @@ Option<bool> Index::run_search(search_args* search_params) {
                           search_params->synonym_sets,
                           search_params->union_result_seq_ids,
                           search_params->diversity, search_params->group_max_candidates,
-                          nullptr);
+                          nullptr, search_params->curated_scope_filter.get());
         first_pass.take_ownership();
 
         // The filter iterator can be updated in places like `Index::do_phrase_search`.
@@ -2715,7 +2715,8 @@ Option<bool> Index::run_search(search_args* search_params) {
                   search_params->union_result_seq_ids,
                   search_params->diversity,
                   search_params->group_max_candidates,
-                  selected_group_keys
+                  selected_group_keys,
+                  search_params->curated_scope_filter.get()
     );
 
     // The filter iterator can be updated in places like `Index::do_phrase_search`.
@@ -3579,7 +3580,8 @@ Option<bool> Index::search(std::vector<query_tokens_t>& field_query_tokens, cons
                    Collection const *const collection,
                    const std::vector<std::string>& synonym_sets, id_list_t* union_result_seq_ids,
                    const diversity_t& diversity, const size_t group_max_candidates,
-                   group_key_allowlist_t group_key_allowlist) const {
+                   group_key_allowlist_t group_key_allowlist,
+                   const filter_node_t* curated_scope_filter) const {
     std::shared_lock lock(mutex);
 
     group_found_params_t group_found_params{};
@@ -3607,8 +3609,11 @@ Option<bool> Index::search(std::vector<query_tokens_t>& field_query_tokens, cons
     topster_size = std::max((size_t)1, topster_size);  // needs to be atleast 1 since scoring is mandatory
     topster = new Topster<KV>(topster_size, group_limit, is_group_by_first_pass, group_found_params, true,
                               group_key_allowlist);
-    curated_topster = new Topster<KV>(topster_size, group_limit, is_group_by_first_pass, group_found_params, true,
-                                      group_key_allowlist);
+    // pins kept only by the scoped key's filter can outnumber the main filter's matches
+    const size_t curated_topster_size = curated_scope_filter != nullptr ?
+                                        std::max<size_t>(topster_size, included_ids.size()) : topster_size;
+    curated_topster = new Topster<KV>(curated_topster_size, group_limit, is_group_by_first_pass, group_found_params,
+                                      true, group_key_allowlist);
 
     std::set<uint32_t> curated_ids;
     std::map<size_t, std::map<size_t, uint32_t>> included_ids_map;  // outer pos => inner pos => list of IDs
@@ -3616,7 +3621,8 @@ Option<bool> Index::search(std::vector<query_tokens_t>& field_query_tokens, cons
 
     process_curated_ids(included_ids, excluded_ids, group_limit, filter_curated_hits,
                         filter_result_iterator, curated_ids, included_ids_map,
-                        included_ids_vec);
+                        included_ids_vec, curated_scope_filter, max_filter_by_candidates,
+                        validate_field_names);
     collate_included_ids({}, included_ids_map, curated_topster, group_limit,
                          group_by_fields, group_missing_values, filter_result_iterator->reference);
     filter_result_iterator->reset();
@@ -4863,7 +4869,10 @@ void Index::process_curated_ids(const std::vector<std::pair<uint32_t, uint32_t>>
                                 const bool filter_curated_hits, filter_result_iterator_t* const filter_result_iterator,
                                 std::set<uint32_t>& curated_ids,
                                 std::map<size_t, std::map<size_t, uint32_t>>& included_ids_map,
-                                std::vector<uint32_t>& included_ids_vec) const {
+                                std::vector<uint32_t>& included_ids_vec,
+                                const filter_node_t* curated_scope_filter,
+                                const size_t max_filter_by_candidates,
+                                const bool validate_field_names) const {
 
     for(const auto& seq_id_pos: included_ids) {
         included_ids_vec.push_back(seq_id_pos.first);
@@ -4872,22 +4881,54 @@ void Index::process_curated_ids(const std::vector<std::pair<uint32_t, uint32_t>>
     //sort the included ids to keep unidirectional iterators valid
     std::sort(included_ids_vec.begin(), included_ids_vec.end());
 
-    // if `filter_curated_hits` is enabled, we will remove curated hits that don't match filter condition
+    // curated hits must match the full filter when `filter_curated_hits` is on, else only the scoped key's filter
     std::set<uint32_t> included_ids_set;
 
-    if(!filter_result_iterator->is_filter_provided() || !filter_curated_hits) {
+    if(!filter_result_iterator->is_filter_provided() || (!filter_curated_hits && curated_scope_filter == nullptr)) {
         included_ids_set.insert(included_ids_vec.begin(), included_ids_vec.end());
-    } else if(filter_result_iterator->validity == filter_result_iterator_t::valid) {
-        for (const auto &included_id: included_ids_vec) {
+    } else {
+        std::vector<uint32_t> failed_ids;
+
+        for(size_t i = 0; i < included_ids_vec.size(); i++) {
+            const auto& included_id = included_ids_vec[i];
             auto result = filter_result_iterator->is_valid(included_id);
 
             if (result == -1) {
+                // an exhausted iterator matches none of the remaining ids
+                if(filter_result_iterator->validity == filter_result_iterator_t::invalid) {
+                    failed_ids.insert(failed_ids.end(), included_ids_vec.begin() + i, included_ids_vec.end());
+                }
                 break;
             }
 
             if (result == 1) {
                 included_ids_set.insert(included_id);
+            } else {
+                failed_ids.push_back(included_id);
             }
+        }
+
+        // with `filter_curated_hits` off, keep ids that match the scoped key's filter
+        if(!filter_curated_hits && curated_scope_filter != nullptr && !failed_ids.empty()) {
+            filter_result_iterator_t scope_iterator(get_collection_name(), this, curated_scope_filter,
+                                                    true, max_filter_by_candidates,
+                                                    search_begin_us, search_stop_us, validate_field_names);
+
+            if(scope_iterator.init_status().ok() && scope_iterator.validity == filter_result_iterator_t::valid) {
+                for(const auto& failed_id: failed_ids) {
+                    auto result = scope_iterator.is_valid(failed_id);
+
+                    if (result == -1) {
+                        break;
+                    }
+
+                    if (result == 1) {
+                        included_ids_set.insert(failed_id);
+                    }
+                }
+            }
+
+            search_cutoff = search_cutoff || scope_iterator.validity == filter_result_iterator_t::timed_out;
         }
     }
 
