@@ -91,6 +91,10 @@ runs:
           bazel-disk-${{ inputs.cache-name }}-${{ steps.week.outputs.week }}-
           ${{ inputs.saves-cache != 'true' && format('bazel-disk-{0}-{1}-', inputs.cache-name, steps.week.outputs.last_week) || '' }}
 
+    - name: Mark the restored disk cache
+      shell: bash
+      run: touch "$RUNNER_TEMP/bazel-disk-restored"
+
     - name: Build protobuf deps
       shell: bash
       run: |

@@ -105,9 +105,17 @@ jobs:
       - name: Run tests
         run: bazel test --cache_test_results=no --test_output=all //:typesense-test --test_timeout=900
 
+      - name: Check for new disk cache entries
+        id: disk-cache
+        if: ${{ !cancelled() && env.SAVES_CACHE == 'true' }}
+        run: |
+          if find /home/runner/.cache/bazel-disk -newer "$RUNNER_TEMP/bazel-disk-restored" -type f -print -quit 2>/dev/null | grep -q .; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
       # only the default branch writes, so every PR starts from its newest build; a failed test still saves
       - name: Save the Bazel disk cache
-        if: ${{ !cancelled() && env.SAVES_CACHE == 'true' }}
+        if: ${{ !cancelled() && steps.disk-cache.outputs.changed == 'true' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: /home/runner/.cache/bazel-disk
