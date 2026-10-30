@@ -1,0 +1,50 @@
+name: cache-cleanup
+
+# fork pr tokens can't delete caches, this runs on a schedule and never checks out code
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  pull-requests: read
+
+jobs:
+  prune-disk-caches:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+
+    steps:
+      # keeps the default branch's newest entry of this week and last week, and an open pr's newest of this week
+      - name: Delete stale Bazel disk caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          week=$(date -u +%G-W%V)
+          last_week=$(date -u -d '7 days ago' +%G-W%V)
+          declare -A kept pr_state
+
+          while IFS=$'\t' read -r id ref key; do
+            [[ $key =~ ^(.+)-([0-9]{4}-W[0-9]{2})-[0-9a-f]{40}$ ]] || continue
+            group="$ref ${BASH_REMATCH[1]}-${BASH_REMATCH[2]}"
+            entry_week=${BASH_REMATCH[2]}
+
+            stale=false
+            if [[ $ref =~ ^refs/pull/([0-9]+)/merge$ ]]; then
+              pr=${BASH_REMATCH[1]}
+              [ -n "${pr_state[$pr]:-}" ] || pr_state[$pr]=$(gh pr view "$pr" --json state --jq .state)
+              [ "${pr_state[$pr]}" = OPEN ] && [ "$entry_week" = "$week" ] || stale=true
+            else
+              [ "$entry_week" = "$week" ] || [ "$entry_week" = "$last_week" ] || stale=true
+            fi
+
+            if [ "$stale" = false ] && [ -z "${kept[$group]:-}" ]; then
+              kept[$group]=1
+            else
+              echo "Deleting $key ($ref)"
+              gh cache delete "$id" || echo "::warning::could not delete cache $id"
+            fi
+          done < <(gh cache list --key bazel-disk- --sort created_at --order desc --limit 1000 --json id,ref,key \
+            --jq '.[] | [.id, .ref, .key] | @tsv')
