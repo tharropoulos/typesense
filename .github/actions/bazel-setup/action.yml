@@ -18,9 +18,9 @@ inputs:
     default: ""
 
 outputs:
-  week:
-    description: the ISO week the disk-cache key uses
-    value: ${{ steps.week.outputs.week }}
+  key:
+    description: the disk-cache key this run saves under
+    value: ${{ steps.restore.outputs.cache-primary-key }}
 
 runs:
   using: composite
@@ -72,7 +72,8 @@ runs:
 
     # setup-bazel saves its disk cache only when the exact key missed, and that key changes only with the build
     # files, so it stopped refreshing; this one is keyed per commit and restores the week's newest entry. A run
-    # that only reads may start from last week's newest one; the saves still start each week empty.
+    # that only reads may start from last week's newest one; the default branch's saves still start each week empty.
+    # a pr saves to its own scope and restores its own newest entry first
     - id: week
       shell: bash
       env:
@@ -83,11 +84,13 @@ runs:
         echo "last_week=${PROBE_LAST_WEEK:-$(date -u -d '7 days ago' +%G-W%V)}" >> "$GITHUB_OUTPUT"
 
     - name: Restore the Bazel disk cache
+      id: restore
       uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
       with:
         path: /home/runner/.cache/bazel-disk
-        key: bazel-disk-${{ inputs.cache-name }}-${{ steps.week.outputs.week }}-${{ github.sha }}
+        key: bazel-disk-${{ inputs.cache-name }}-${{ github.event.pull_request.number && format('pr-{0}-', github.event.pull_request.number) || '' }}${{ steps.week.outputs.week }}-${{ github.sha }}
         restore-keys: |
+          ${{ github.event.pull_request.number && format('bazel-disk-{0}-pr-{1}-{2}-', inputs.cache-name, github.event.pull_request.number, steps.week.outputs.week) || '' }}
           bazel-disk-${{ inputs.cache-name }}-${{ steps.week.outputs.week }}-
           ${{ inputs.saves-cache != 'true' && format('bazel-disk-{0}-{1}-', inputs.cache-name, steps.week.outputs.last_week) || '' }}
 

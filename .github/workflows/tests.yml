@@ -16,7 +16,7 @@ env:
   # it to start empty. Each push to the default branch saves a new entry, and each ISO week starts empty:
   # Bazel 6.2 never marks an entry as read, so entries a build no longer uses can't be pruned.
   BAZEL_DISK_CACHE: main-jan21-2026
-  # only a push to the default branch saves the disk cache; every other run only reads it
+  # only a push to the default branch saves the shared disk cache, a pr saves to its own scope
   SAVES_CACHE: ${{ github.event_name == 'push' && github.ref_name == github.event.repository.default_branch }}
 
 jobs:
@@ -107,19 +107,19 @@ jobs:
 
       - name: Check for new disk cache entries
         id: disk-cache
-        if: ${{ !cancelled() && env.SAVES_CACHE == 'true' }}
+        if: ${{ !cancelled() && (env.SAVES_CACHE == 'true' || github.event_name == 'pull_request') }}
         run: |
           if find /home/runner/.cache/bazel-disk -newer "$RUNNER_TEMP/bazel-disk-restored" -type f -print -quit 2>/dev/null | grep -q .; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # only the default branch writes, so every PR starts from its newest build; a failed test still saves
+      # a pr's entry is readable only by that pr, a failed test still saves
       - name: Save the Bazel disk cache
         if: ${{ !cancelled() && steps.disk-cache.outputs.changed == 'true' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: /home/runner/.cache/bazel-disk
-          key: bazel-disk-${{ env.BAZEL_DISK_CACHE }}-${{ steps.setup.outputs.week }}-${{ github.sha }}
+          key: ${{ steps.setup.outputs.key }}
 
       - name: Set BAZEL_TESTLOGS_FULL_PATH
         run: echo "BAZEL_TESTLOGS_FULL_PATH=$(readlink -f bazel-testlogs)" >> $GITHUB_ENV
