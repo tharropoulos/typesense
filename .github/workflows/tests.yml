@@ -1,6 +1,6 @@
 name: tests
 
-on: [push, pull_request]
+on: pull_request
 
 # Cancel previous running if a new push is made
 # Source: https://stackoverflow.com/a/72408109/123545
@@ -22,7 +22,7 @@ env:
 jobs:
   # without a cache the build compiles everything, so it goes to COLD_RUNNER; skipped when that isn't set
   cache-probe:
-    if: vars.COLD_RUNNER != '' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository)
+    if: vars.COLD_RUNNER != '' && (github.event_name == 'push' || github.event_name == 'pull_request')
     runs-on: ubuntu-22.04
     cache-mode: read
     outputs:
@@ -48,7 +48,7 @@ jobs:
   # builds only the server, so the API tests start without waiting for the C++ suite
   build:
     needs: cache-probe
-    if: ${{ !cancelled() && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository) }}
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'pull_request') }}
     runs-on: ${{ needs.cache-probe.outputs.warm == 'true' && (vars.TEST_RUNNER || 'ubuntu-22.04') || (vars.COLD_RUNNER || vars.TEST_RUNNER || 'ubuntu-22.04') }}
     cache-mode: read
 
@@ -81,7 +81,7 @@ jobs:
   test:
     needs: cache-probe
     # a same-repo PR is already tested by its branch's push run
-    if: ${{ !cancelled() && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository) }}
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'pull_request') }}
     runs-on: ${{ needs.cache-probe.outputs.warm == 'true' && (vars.TEST_RUNNER || 'ubuntu-22.04') || (vars.COLD_RUNNER || vars.TEST_RUNNER || 'ubuntu-22.04') }}
 
     steps:
