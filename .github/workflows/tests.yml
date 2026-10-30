@@ -24,6 +24,7 @@ jobs:
   cache-probe:
     if: vars.COLD_RUNNER != '' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository)
     runs-on: ubuntu-22.04
+    cache-mode: read
     outputs:
       warm: ${{ steps.lookup.outputs.cache-matched-key != '' }}
       week: ${{ steps.week.outputs.week }}
@@ -49,6 +50,7 @@ jobs:
     needs: cache-probe
     if: ${{ !cancelled() && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository) }}
     runs-on: ${{ needs.cache-probe.outputs.warm == 'true' && (vars.TEST_RUNNER || 'ubuntu-22.04') || (vars.COLD_RUNNER || vars.TEST_RUNNER || 'ubuntu-22.04') }}
+    cache-mode: read
 
     steps:
       - name: Checkout code
